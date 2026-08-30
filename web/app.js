@@ -220,6 +220,10 @@ const ICON_TRASH =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>';
 const ICON_RETRY =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>';
+const ICON_AGENT =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4M9 4h6"/><circle cx="9" cy="14" r="1.2" fill="currentColor" stroke="none"/><circle cx="15" cy="14" r="1.2" fill="currentColor" stroke="none"/></svg>';
+const ICON_SKILL =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg>';
 
 function renderAttachStrip() {
   const strip = $('attachStrip');
@@ -890,7 +894,8 @@ async function runCompletion(chat) {
   setLed('busy');
 
   const messages = [];
-  if (state.cfg.system.trim()) messages.push({ role: 'system', content: state.cfg.system.trim() });
+  const systemPrompt = composeSystemPrompt();
+  if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
   messages.push(
     ...chat.messages.map((m) => ({
       role: m.role,
@@ -1345,8 +1350,11 @@ function conceal(el, after) {
   hideTimers.set(el, setTimeout(() => { el.hidden = true; }, after));
 }
 
+const ALL_PANELS = ['drawer', 'sheet', 'presetSheet'];
+
 function openPanel(el) {
-  for (const other of [$('drawer'), $('sheet')]) {
+  for (const id of ALL_PANELS) {
+    const other = $(id);
     if (other !== el && !other.hidden) conceal(other, 460);
   }
   reveal(scrim);
@@ -1354,8 +1362,7 @@ function openPanel(el) {
 }
 
 function closePanels() {
-  conceal($('drawer'), 460);
-  conceal($('sheet'), 460);
+  for (const id of ALL_PANELS) conceal($(id), 460);
   conceal(scrim, 360);
 }
 
@@ -1456,6 +1463,198 @@ $('testBtn').addEventListener('click', async () => {
   msg.className = 'probe-msg ok';
   msg.textContent = `연결됨 · ${data.models.join(', ')}`;
 });
+
+/* ------------------------------------------------------------- presets */
+
+/**
+ * Agents and skills are both just named instruction blocks the model reads
+ * as system context — the only real difference is how many can be on at
+ * once. An agent is a persona: switching one on switches the others off,
+ * the way you can't be two characters at the same time. A skill is a
+ * capability: any number stack together. Composed fresh into one system
+ * message on every request in runCompletion(), so turning a preset on or
+ * off takes effect on the very next message — nothing to reload or apply.
+ */
+const PRESETS_KEY = 'sh-agent:presets';
+
+function loadPresets() {
+  try {
+    return JSON.parse(localStorage.getItem(PRESETS_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+const savePresets = (presets) => localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+
+/** The system message actually sent: active agent, then enabled skills, then the manual system prompt field. */
+function composeSystemPrompt() {
+  const presets = loadPresets();
+  const agent = presets.find((p) => p.type === 'agent' && p.enabled);
+  const skills = presets.filter((p) => p.type === 'skill' && p.enabled);
+  const parts = [];
+  if (agent?.instructions.trim()) parts.push(agent.instructions.trim());
+  for (const s of skills) {
+    if (s.instructions.trim()) parts.push(`## ${s.name}\n${s.instructions.trim()}`);
+  }
+  if (state.cfg.system.trim()) parts.push(state.cfg.system.trim());
+  return parts.join('\n\n');
+}
+
+function renderActivePresets() {
+  const presets = loadPresets();
+  const active = presets.filter((p) => p.enabled);
+  const wrap = $('activePresets');
+  wrap.hidden = active.length === 0;
+  wrap.replaceChildren();
+  for (const p of active) {
+    const chip = document.createElement('span');
+    chip.className = `active-chip ${p.type}`;
+    chip.innerHTML = `${p.type === 'agent' ? ICON_AGENT : ICON_SKILL}<span>${esc(p.name)}</span>`;
+    wrap.append(chip);
+  }
+}
+
+function paintPresetList(type) {
+  const list = $(type === 'agent' ? 'agentList' : 'skillList');
+  const presets = loadPresets().filter((p) => p.type === type);
+  list.replaceChildren();
+  if (!presets.length) {
+    const empty = document.createElement('p');
+    empty.className = 'preset-empty';
+    empty.textContent =
+      type === 'agent'
+        ? '아직 만든 에이전트가 없습니다. 역할과 말투를 정해두면 그 페르소나로 대화합니다.'
+        : '아직 만든 스킬이 없습니다. 항상 지키길 바라는 규칙을 적어두면 켜져 있는 동안 계속 적용됩니다.';
+    list.append(empty);
+    return;
+  }
+  for (const p of presets) {
+    const row = document.createElement('div');
+    row.className = 'preset-item';
+
+    const info = document.createElement('button');
+    info.className = 'preset-info';
+    info.type = 'button';
+    info.innerHTML =
+      `<span class="preset-name">${esc(p.name)}</span>` +
+      (p.description ? `<span class="preset-desc">${esc(p.description)}</span>` : '');
+    info.addEventListener('click', () => openPresetEditor(type, p.id));
+
+    const toggle = document.createElement('button');
+    toggle.className = `preset-toggle${p.enabled ? ' on' : ''}`;
+    toggle.type = 'button';
+    toggle.setAttribute('aria-label', p.enabled ? '끄기' : '켜기');
+    toggle.setAttribute('role', 'switch');
+    toggle.setAttribute('aria-checked', String(p.enabled));
+    toggle.addEventListener('click', () => togglePreset(p.id));
+
+    row.append(info, toggle);
+    list.append(row);
+  }
+}
+
+/** Turning an agent on turns any other agent off — skills stack freely. */
+function togglePreset(id) {
+  const presets = loadPresets();
+  const target = presets.find((p) => p.id === id);
+  if (!target) return;
+  const turningOn = !target.enabled;
+  if (turningOn && target.type === 'agent') {
+    for (const p of presets) if (p.type === 'agent') p.enabled = false;
+  }
+  target.enabled = turningOn;
+  savePresets(presets);
+  paintPresetList(target.type);
+  renderActivePresets();
+}
+
+let editingPreset = null; // { type, id } — id null means "creating new"
+
+function openPresetEditor(type, id = null) {
+  const presets = loadPresets();
+  const p = id ? presets.find((x) => x.id === id) : null;
+  editingPreset = { type, id };
+
+  $('presetSheetTitle').textContent = p
+    ? (type === 'agent' ? '에이전트 수정' : '스킬 수정')
+    : (type === 'agent' ? '에이전트 만들기' : '스킬 만들기');
+  $('presetHint').hidden = false;
+  $('presetHint').textContent =
+    type === 'agent'
+      ? '이 역할로 대화하고 싶을 때 켜세요. 다른 에이전트를 켜면 자동으로 꺼집니다.'
+      : '항상 지켰으면 하는 규칙을 적으세요. 여러 스킬을 동시에 켤 수 있습니다.';
+  $('presetName').value = p?.name || '';
+  $('presetDesc').value = p?.description || '';
+  $('presetInstructions').value = p?.instructions || '';
+  $('presetDeleteBtn').hidden = !p;
+  $('presetSaveBtn').textContent = p ? '저장' : '저장하고 켜기';
+
+  openPanel($('presetSheet'));
+  setTimeout(() => $('presetName').focus(), 350);
+}
+
+$('newAgentBtn').addEventListener('click', () => openPresetEditor('agent'));
+$('newSkillBtn').addEventListener('click', () => openPresetEditor('skill'));
+$('presetSheetClose').addEventListener('click', closePanels);
+
+$('presetSaveBtn').addEventListener('click', () => {
+  if (!editingPreset) return;
+  const name = $('presetName').value.trim();
+  const instructions = $('presetInstructions').value.trim();
+  if (!name || !instructions) {
+    toast('이름과 지침을 모두 입력하세요');
+    return;
+  }
+
+  const presets = loadPresets();
+  const { type, id } = editingPreset;
+  let target = id ? presets.find((p) => p.id === id) : null;
+  const isNew = !target;
+  if (!target) {
+    target = { id: newId(), type, enabled: false };
+    presets.push(target);
+  }
+  target.name = name;
+  target.description = $('presetDesc').value.trim();
+  target.instructions = instructions;
+  // A brand-new preset turns itself on — the whole point of making one is
+  // to use it right away. Editing an existing one leaves its state alone.
+  if (isNew) {
+    if (type === 'agent') for (const p of presets) if (p.type === 'agent') p.enabled = false;
+    target.enabled = true;
+  }
+
+  savePresets(presets);
+  paintPresetList(type);
+  renderActivePresets();
+  closePanels();
+  toast(isNew ? `'${name}' 을(를) 만들었습니다` : '저장했습니다');
+});
+
+$('presetDeleteBtn').addEventListener('click', () => {
+  if (!editingPreset?.id) return;
+  const presets = loadPresets().filter((p) => p.id !== editingPreset.id);
+  savePresets(presets);
+  paintPresetList(editingPreset.type);
+  renderActivePresets();
+  closePanels();
+});
+
+for (const tabBtn of document.querySelectorAll('.drawer-tab')) {
+  tabBtn.addEventListener('click', () => {
+    const tab = tabBtn.dataset.tab;
+    for (const b of document.querySelectorAll('.drawer-tab')) {
+      b.classList.toggle('active', b === tabBtn);
+      b.setAttribute('aria-selected', String(b === tabBtn));
+    }
+    for (const panel of document.querySelectorAll('.drawer-panel')) {
+      panel.hidden = panel.dataset.panel !== tab;
+    }
+    if (tab === 'agents') paintPresetList('agent');
+    else if (tab === 'skills') paintPresetList('skill');
+    else paintHistory();
+  });
+}
 
 /* ---------------------------------------------------------------- history */
 
@@ -1624,6 +1823,7 @@ state.activeId = state.chats[0]?.id || null;
 paintSeeds();
 paintThread();
 paintHistory();
+renderActivePresets();
 autoGrow();
 health(true);
 recoverPendingGeneration();

@@ -76,6 +76,7 @@
 </main>
 
 <footer class="composer-wrap">
+  <div class="active-presets" id="activePresets" hidden></div>
   <div class="attach-strip" id="attachStrip" hidden></div>
 
   <form class="composer" id="composer">
@@ -101,12 +102,35 @@
 
 <div class="scrim" id="scrim" hidden></div>
 
-<aside class="drawer" id="drawer" hidden aria-label="대화 목록">
-  <div class="drawer-head">
-    <span class="panel-title">대화</span>
-    <button class="ghost-btn" id="newChatBtn">새 대화</button>
+<aside class="drawer" id="drawer" hidden aria-label="메뉴">
+  <div class="drawer-tabs" role="tablist">
+    <button class="drawer-tab active" type="button" data-tab="chats" role="tab" aria-selected="true">대화</button>
+    <button class="drawer-tab" type="button" data-tab="agents" role="tab" aria-selected="false">에이전트</button>
+    <button class="drawer-tab" type="button" data-tab="skills" role="tab" aria-selected="false">스킬</button>
   </div>
-  <div class="history" id="history"></div>
+
+  <div class="drawer-panel" data-panel="chats">
+    <div class="drawer-panel-head">
+      <button class="ghost-btn" id="newChatBtn">새 대화</button>
+    </div>
+    <div class="history" id="history"></div>
+  </div>
+
+  <div class="drawer-panel" data-panel="agents" hidden>
+    <div class="drawer-panel-head">
+      <span class="panel-note">한 번에 하나만 켤 수 있어요</span>
+      <button class="ghost-btn" id="newAgentBtn">+ 만들기</button>
+    </div>
+    <div class="preset-list" id="agentList"></div>
+  </div>
+
+  <div class="drawer-panel" data-panel="skills" hidden>
+    <div class="drawer-panel-head">
+      <span class="panel-note">여러 개 동시에 켤 수 있어요</span>
+      <button class="ghost-btn" id="newSkillBtn">+ 만들기</button>
+    </div>
+    <div class="preset-list" id="skillList"></div>
+  </div>
 </aside>
 
 <section class="sheet" id="sheet" hidden aria-label="설정">
@@ -155,6 +179,38 @@
       <span class="field-label">온도 <b id="tempVal">0.7</b></span>
       <input id="fTemp" type="range" min="0" max="1.4" step="0.1" value="0.7" />
     </label>
+  </div>
+</section>
+
+<section class="sheet" id="presetSheet" hidden aria-label="에이전트·스킬 편집">
+  <div class="grabber" aria-hidden="true"></div>
+  <div class="sheet-head">
+    <span class="panel-title" id="presetSheetTitle">만들기</span>
+    <button class="ghost-btn" id="presetSheetClose">닫기</button>
+  </div>
+
+  <div class="sheet-body">
+    <p class="setup-hint" id="presetHint"></p>
+
+    <label class="field">
+      <span class="field-label">이름</span>
+      <input id="presetName" type="text" autocomplete="off" placeholder="예: 번역가" maxlength="40" />
+    </label>
+
+    <label class="field">
+      <span class="field-label">설명 <span class="field-optional">선택</span></span>
+      <input id="presetDesc" type="text" autocomplete="off" placeholder="목록에서 보일 한 줄 설명" maxlength="80" />
+    </label>
+
+    <label class="field">
+      <span class="field-label">지침</span>
+      <textarea id="presetInstructions" rows="8" placeholder="모델에게 전달할 역할·말투·규칙을 적어주세요"></textarea>
+    </label>
+
+    <div class="preset-editor-actions">
+      <button class="ghost-btn danger" id="presetDeleteBtn" type="button" hidden>삭제</button>
+      <button class="ghost-btn wide primary" id="presetSaveBtn" type="button">저장하고 켜기</button>
+    </div>
   </div>
 </section>
 

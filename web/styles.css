@@ -734,6 +734,128 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .history-item .kill svg { width: 15px; height: 15px; }
 .history-empty { padding: 14px 11px; color: var(--ink-3); font-size: 0.82rem; }
 
+/* drawer tabs: 대화 / 에이전트 / 스킬 -------------------------------------- */
+.drawer-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  margin: 2px 2px 12px;
+  border-radius: 12px;
+  background: var(--surface);
+}
+.drawer-tab {
+  flex: 1;
+  padding: 8px 6px;
+  border-radius: 10px;
+  font-size: 0.8rem;
+  color: var(--ink-3);
+  transition: background 0.22s var(--ease), color 0.22s var(--ease);
+}
+.drawer-tab:hover { color: var(--ink-2); }
+.drawer-tab.active { background: var(--bg); color: var(--ink); box-shadow: var(--shadow); }
+
+.drawer-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.drawer-panel[hidden] { display: none; }
+.drawer-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 2px 12px;
+}
+.panel-note { font-size: 0.74rem; color: var(--ink-3); }
+
+/* agent/skill list ----------------------------------------------------------
+   Same shape as .history-item on purpose — it's the same kind of row. */
+.preset-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.preset-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 8px 9px 11px;
+  border-radius: 11px;
+  transition: background 0.2s var(--ease);
+}
+.preset-item:hover { background: var(--surface); }
+.preset-item .preset-info {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.preset-item .preset-name {
+  font-size: 0.86rem;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.preset-item .preset-desc {
+  font-size: 0.74rem;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.preset-empty { padding: 14px 11px; color: var(--ink-3); font-size: 0.82rem; line-height: 1.6; }
+
+/* toggle switch */
+.preset-toggle {
+  position: relative;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 23px;
+  border-radius: 99px;
+  background: var(--line);
+  transition: background 0.25s var(--ease);
+}
+.preset-toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 19px; height: 19px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: transform 0.25s var(--ease-soft);
+}
+.preset-toggle.on { background: var(--accent); }
+.preset-toggle.on::after { transform: translateX(15px); }
+
+.field-optional { color: var(--ink-3); font-weight: 400; font-size: 0.85em; }
+
+.preset-editor-actions { display: flex; gap: 8px; padding-top: 2px; }
+.ghost-btn.primary { flex: 1; border-color: transparent; background: var(--accent); color: #fff; }
+.ghost-btn.primary:hover { color: #fff; filter: brightness(1.08); border-color: transparent; background: var(--accent); }
+.ghost-btn.danger { color: #c9615f; border-color: var(--line); }
+.ghost-btn.danger:hover { background: rgba(201, 97, 95, 0.12); border-color: transparent; color: #c9615f; }
+
+/* small active-preset chip above the composer -------------------------------- */
+.active-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: var(--rail);
+  margin: 0 auto 8px;
+  padding: 0 max(14px, env(safe-area-inset-left)) 0 max(14px, env(safe-area-inset-right));
+}
+.active-presets[hidden] { display: none; }
+.active-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  font-size: 0.74rem;
+  color: var(--ink-2);
+}
+.active-chip svg { width: 12px; height: 12px; color: var(--accent); }
+.active-chip.skill svg { color: var(--ink-3); }
+
 .sheet {
   position: fixed;
   left: 0; right: 0; bottom: 0;
