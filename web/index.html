@@ -11,6 +11,30 @@
 <meta name="apple-mobile-web-app-title" content="sh-agent" />
 <meta name="mobile-web-app-capable" content="yes" />
 <title>sh-agent</title>
+<meta name="build" content="__BUILD__" />
+<script>
+  // GitHub Pages caches this document itself for a while (the asset-hash
+  // trick in the workflow only busts app.js/styles.css), so a phone that
+  // already had the page open could sit on a stale build until someone
+  // thought to pull down and refresh. Every load quietly re-fetches the
+  // real HTML over the network — bypassing that cache — and reloads once
+  // if the build stamp actually differs. No visible flash on a fresh load;
+  // this races in parallel with normal parsing and only acts on a mismatch.
+  (function () {
+    if (sessionStorage.getItem('sh-agent:reloaded-for-build')) return;
+    fetch(location.pathname, { cache: 'no-store' })
+      .then(function (r) { return r.text(); })
+      .then(function (html) {
+        var latest = html.match(/<meta name="build" content="([^"]+)"/);
+        var mine = document.querySelector('meta[name="build"]');
+        if (!latest || !mine || latest[1] === mine.content) return;
+        sessionStorage.setItem('sh-agent:reloaded-for-build', '1');
+        var bust = (location.search ? '&' : '?') + '_b=' + Date.now();
+        location.replace(location.pathname + location.search + bust + location.hash);
+      })
+      .catch(function () {});
+  })();
+</script>
 <link rel="manifest" href="./manifest.json" />
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0a0b'/><circle cx='16' cy='16' r='5' fill='%23c96f4a'/></svg>" />
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />

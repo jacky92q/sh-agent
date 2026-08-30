@@ -52,14 +52,18 @@ jobs:
           # turns Pages on for the repo if it has never been enabled
           enablement: true
       # Pages serves assets with max-age=600, so a phone happily keeps running
-      # the previous bundle for ten minutes after a push. Stamping the URLs with
-      # the commit makes every deploy a cache miss.
-      - name: Stamp asset URLs
+      # the previous bundle for ten minutes after a push. Stamping the asset
+      # URLs makes every deploy a cache miss for those; stamping the meta tag
+      # too lets index.html's own inline script notice ITS cached copy is
+      # stale and reload — the one thing an asset-hash query can't cover,
+      # since the document that contains it is what's cached.
+      - name: Stamp build identifiers
         run: |
           v="${GITHUB_SHA::8}"
-          sed -i "s|\./styles\.css|./styles.css?v=$v|g; s|\./app\.js|./app.js?v=$v|g" web/index.html
-          grep -q "app.js?v=$v" web/index.html || { echo "stamping did not take"; exit 1; }
-          grep -o 'href="[^"]*"\|src="[^"]*"' web/index.html
+          sed -i "s|\./styles\.css|./styles.css?v=$v|g; s|\./app\.js|./app.js?v=$v|g; s|__BUILD__|$v|" web/index.html
+          grep -q "app.js?v=$v" web/index.html || { echo "asset stamping did not take"; exit 1; }
+          grep -q "content=\"$v\"" web/index.html || { echo "build meta stamping did not take"; exit 1; }
+          grep -o 'href="[^"]*"\|src="[^"]*"\|content="[a-f0-9]\{8\}"' web/index.html
 
       - uses: actions/upload-pages-artifact@v3
         with:
