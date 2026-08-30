@@ -45,6 +45,16 @@ jobs:
         with:
           # turns Pages on for the repo if it has never been enabled
           enablement: true
+      # Pages serves assets with max-age=600, so a phone happily keeps running
+      # the previous bundle for ten minutes after a push. Stamping the URLs with
+      # the commit makes every deploy a cache miss.
+      - name: Stamp asset URLs
+        run: |
+          v="${GITHUB_SHA::8}"
+          sed -i "s|\./styles\.css|./styles.css?v=$v|g; s|\./app\.js|./app.js?v=$v|g" web/index.html
+          grep -q "app.js?v=$v" web/index.html || { echo "stamping did not take"; exit 1; }
+          grep -o 'href="[^"]*"\|src="[^"]*"' web/index.html
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web
