@@ -239,7 +239,10 @@ function renderAttachStrip() {
   }
 }
 
-const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'm4a', 'ogg', 'oga', 'webm', 'flac', 'aac', 'opus']);
+const AUDIO_EXTENSIONS = new Set([
+  'mp3', 'wav', 'wave', 'm4a', 'ogg', 'oga', 'webm', 'flac', 'aac', 'opus',
+  'caf', 'aiff', 'aif', 'amr', '3gp', '3gpp', 'wma', 'mp2', 'mp4a',
+]);
 const isAudioFile = (file) => file.type.startsWith('audio/') || AUDIO_EXTENSIONS.has((file.name.split('.').pop() || '').toLowerCase());
 
 async function addFiles(fileList) {
@@ -273,8 +276,19 @@ async function addFiles(fileList) {
 
     const kind = docKind(file);
     if (!kind) {
-      toast(`${file.name} 은(는) 지원하지 않는 형식입니다 (이미지 · 오디오 · 텍스트 · PDF만 가능)`);
-      continue;
+      // Not clearly audio by extension/MIME (a voice memo saved as .caf, an
+      // Android recorder's .3gp, or anything the OS never registered a MIME
+      // type for and reports as application/octet-stream all land here) —
+      // last resort: actually try to decode it before giving up on it.
+      if (countPending('audio') >= MAX_AUDIO) { audioOverflow = true; continue; }
+      try {
+        const { dataUrl, durationSec } = await blobToWav(file);
+        state.pendingAttachments.push({ id: newId(), kind: 'audio', dataUrl, durationSec });
+        continue;
+      } catch {
+        toast(`${file.name} 은(는) 지원하지 않는 형식입니다 (이미지 · 오디오 · 텍스트 · PDF만 가능)`);
+        continue;
+      }
     }
     if (countPending('doc') >= MAX_DOCS) { docOverflow = true; continue; }
     if (file.size > MAX_DOC_BYTES) {
@@ -508,9 +522,25 @@ function toApiContent(content) {
 }
 
 /**
- * gemma-4 streams `reasoning_content` before it streams an answer. Rather than
- * leaving the reader staring at three dots, the thinking is shown live and then
- * folded away the moment real content starts.
+ * gemma-4's reasoning tends to read like "1.  **Analyze the Request:** ...",
+ * a numbered list of bold mini-headers. Rather than dumping that whole
+ * growing wall of text while it streams, pull out the most recent header as
+ * a one-line "what it's doing right now" label — the raw text is still
+ * there underneath, just behind a tap.
+ */
+function latestThinkingPhase(text) {
+  const matches = text.match(/\*\*([^*\n]{2,42})\*\*/g);
+  if (!matches) return null;
+  return matches[matches.length - 1].replace(/\*\*/g, '').replace(/[:：]\s*$/, '').trim();
+}
+
+/**
+ * gemma-4 streams a reasoning delta before it streams an answer (Ollama's
+ * field is called `reasoning`, not the `reasoning_content` OpenAI/LM Studio
+ * use for the same thing — both are handled). Rather than
+ * leaving the reader staring at three dots, a live phase label is shown and
+ * folded away the moment real content starts — the full trace stays behind
+ * the toggle the whole time, open only if someone taps it.
  */
 function addModelTurn() {
   const el = document.createElement('div');
@@ -524,7 +554,7 @@ function addModelTurn() {
   think.className = 'think';
   think.hidden = true;
   think.innerHTML =
-    '<button class="think-toggle" type="button" aria-expanded="true">' +
+    '<button class="think-toggle" type="button" aria-expanded="false">' +
     '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>' +
     '<span class="think-label">생각하는 중</span></button>' +
     '<div class="think-fold"><div class="think-body"></div></div>';
@@ -543,18 +573,20 @@ function addModelTurn() {
   toggle.addEventListener('click', () => {
     const open = think.classList.toggle('open');
     toggle.setAttribute('aria-expanded', String(open));
+    if (open) thinkBody.scrollTop = thinkBody.scrollHeight;
   });
 
   return {
     el,
     body,
     showThinking(text) {
-      if (think.hidden) {
-        think.hidden = false;
-        think.classList.add('open');
-      }
+      // Reveal the collapsed summary bar; never force it open — that was the
+      // whole point, the raw trace only shows up if someone taps for it.
+      think.hidden = false;
+      const phase = latestThinkingPhase(text);
+      label.textContent = phase ? `생각 중 · ${phase}` : '생각하는 중';
       thinkBody.textContent = text;
-      thinkBody.scrollTop = thinkBody.scrollHeight;
+      if (think.classList.contains('open')) thinkBody.scrollTop = thinkBody.scrollHeight;
     },
     sealThinking(seconds) {
       // Remember the duration even when the fold is not on screen yet: in a
@@ -660,6 +692,48 @@ function fillModels(models) {
 
 /* ------------------------------------------------------------------ stream */
 
+const PENDING_KEY = 'sh-agent:pending';
+const savePending = (rec) => { try { localStorage.setItem(PENDING_KEY, JSON.stringify(rec)); } catch {} };
+const clearPending = () => localStorage.removeItem(PENDING_KEY);
+function loadPending() {
+  try { return JSON.parse(localStorage.getItem(PENDING_KEY) || 'null'); } catch { return null; }
+}
+
+async function fetchJob(endpoint, token, jobId, signal) {
+  const r = await fetch(`${endpoint.replace(/\/+$/, '')}/v1/jobs/${jobId}`, {
+    headers: { authorization: `Bearer ${token}` },
+    cache: 'no-store',
+    signal,
+  });
+  if (!r.ok) throw new Error(`job ${r.status}`);
+  return r.json();
+}
+
+/**
+ * The relay keeps generating and buffering even after the phone's connection
+ * to it drops (a backgrounded tab losing its socket, mid-answer). This polls
+ * that buffer until the relay marks the job done, feeding every partial
+ * update to onUpdate along the way — used both to resume a stream that broke
+ * mid-session and to recover one after a full reload wiped the turn's DOM.
+ */
+async function pollJobToCompletion(endpoint, token, jobId, onUpdate, maxMs = 10 * 60 * 1000) {
+  const deadline = Date.now() + maxMs;
+  for (;;) {
+    let job;
+    try {
+      job = await fetchJob(endpoint, token, jobId, AbortSignal.timeout(8000));
+    } catch {
+      if (Date.now() > deadline) throw new Error('시간 초과');
+      await new Promise((r) => setTimeout(r, 1500));
+      continue;
+    }
+    onUpdate(job);
+    if (job.done) return job;
+    if (Date.now() > deadline) throw new Error('시간 초과');
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+}
+
 async function send(text, images = [], docs = [], audios = []) {
   if (state.stream) return;
   const { endpoint, token } = state.cfg;
@@ -725,6 +799,8 @@ async function send(text, images = [], docs = [], audios = []) {
     return true;
   };
 
+  let jobId = null;
+
   try {
     const res = await fetch(`${endpoint.replace(/\/+$/, '')}/v1/chat/completions`, {
       method: 'POST',
@@ -737,6 +813,15 @@ async function send(text, images = [], docs = [], audios = []) {
       }),
       signal: controller.signal,
     });
+
+    // The relay keeps this job's answer buffered server-side even if our
+    // connection drops — see the catch block, and recoverPendingGeneration()
+    // for the same thing after a full reload.
+    jobId = res.headers.get('x-job-id');
+    if (jobId) {
+      controller.jobId = jobId;
+      savePending({ chatId: chat.id, jobId, endpoint, token, at: Date.now() });
+    }
 
     if (!res.ok) {
       let msg = `서버가 ${res.status} 응답을 보냈습니다`;
@@ -765,8 +850,11 @@ async function send(text, images = [], docs = [], audios = []) {
         try {
           const delta = JSON.parse(payload).choices?.[0]?.delta;
           if (!delta) continue;
-          if (delta.reasoning_content) {
-            reasoning += delta.reasoning_content;
+          // Ollama sends this as `reasoning`; LM Studio (and OpenAI) call the
+          // same thing `reasoning_content`. Take whichever shows up.
+          const reasoningDelta = delta.reasoning ?? delta.reasoning_content;
+          if (reasoningDelta) {
+            reasoning += reasoningDelta;
             schedule();
           }
           if (delta.content) {
@@ -779,6 +867,7 @@ async function send(text, images = [], docs = [], audios = []) {
     }
 
     paint();
+    clearPending();
     commit();
     if (!acc.trim()) {
       turn.el.remove();
@@ -787,11 +876,30 @@ async function send(text, images = [], docs = [], audios = []) {
   } catch (err) {
     if (controller.signal.aborted) {
       paint();
+      clearPending();
       if (!commit()) turn.el.remove();
+    } else if (jobId) {
+      // Not a deliberate stop — most likely a backgrounded phone losing its
+      // connection to the relay. The relay may well still be generating, so
+      // catch up from its buffer instead of quietly truncating the answer.
+      try {
+        const final = await pollJobToCompletion(endpoint, token, jobId, (job) => {
+          if (job.reasoning) { reasoning = job.reasoning; turn.showThinking(reasoning); }
+          if (job.content) { acc = job.content; turn.body.innerHTML = renderMarkdown(acc); scrollToEnd(); }
+        });
+        reasoning = final.reasoning || reasoning;
+        acc = final.content || acc;
+        paint();
+        clearPending();
+        if (commit()) toast('연결이 끊겼지만 응답을 이어받았습니다');
+        else { turn.el.remove(); addNotice('모델이 빈 응답을 보냈습니다.'); }
+      } catch (e2) {
+        clearPending();
+        if (commit()) addNotice('<b>연결이 끊겼습니다</b> · 여기까지만 받았습니다');
+        else { turn.el.remove(); addNotice(`<b>실패</b> · ${esc(e2.message)}`); }
+      }
     } else if (commit()) {
-      // A phone that locks mid-answer drops the connection. Keep the partial
-      // reply rather than throwing away what the model already said.
-      addNotice(`<b>연결이 끊겼습니다</b> · 여기까지만 받았습니다`);
+      addNotice('<b>연결이 끊겼습니다</b> · 여기까지만 받았습니다');
     } else {
       turn.el.remove();
       addNotice(`<b>실패</b> · ${esc(err.message)}`);
@@ -847,9 +955,27 @@ input.addEventListener('paste', (e) => {
   if (files.length) addFiles(files);
 });
 
+/**
+ * Aborting the client's fetch alone would no longer stop generation — the
+ * relay keeps a dropped connection's job running on purpose, for resilience.
+ * An explicit stop has to say so too, or "stop" would quietly keep burning
+ * GPU time for an answer nobody is going to read.
+ */
+function cancelStream() {
+  const { jobId } = state.stream;
+  const { endpoint, token } = state.cfg;
+  state.stream.abort();
+  if (jobId && endpoint) {
+    fetch(`${endpoint.replace(/\/+$/, '')}/v1/jobs/${jobId}/cancel`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+    }).catch(() => {});
+  }
+}
+
 $('composer').addEventListener('submit', (e) => {
   e.preventDefault();
-  if (state.stream) { state.stream.abort(); return; }
+  if (state.stream) { cancelStream(); return; }
   const text = input.value.trim();
   const images = state.pendingAttachments.filter((a) => a.kind === 'image').map((a) => a.dataUrl);
   const docs = state.pendingAttachments.filter((a) => a.kind === 'doc');
@@ -1177,7 +1303,7 @@ function paintHistory() {
 }
 
 $('newChatBtn').addEventListener('click', () => {
-  if (state.stream) state.stream.abort();
+  if (state.stream) cancelStream();
   const blank = state.chats.find((c) => c.messages.length === 0);
   state.activeId = blank ? blank.id : null;
   paintThread();
@@ -1230,6 +1356,62 @@ window.addEventListener('hashchange', () => {
   }
 });
 
+/**
+ * Covers the case in-session recovery can't: the tab wasn't just throttled,
+ * it was fully discarded and reopened fresh (common on iOS once a page has
+ * been backgrounded a while) — so there's no turn, no `acc`, no closures
+ * left to resume. The one thing that survives is this localStorage record,
+ * pointing at a relay job that may well have finished minutes ago.
+ */
+async function recoverPendingGeneration() {
+  const pending = loadPending();
+  if (!pending) return;
+  if (Date.now() - pending.at > 18 * 60 * 1000) { clearPending(); return; }
+
+  const chat = state.chats.find((c) => c.id === pending.chatId);
+  if (!chat) { clearPending(); return; }
+
+  const isActive = state.activeId === pending.chatId;
+  let turn = null;
+  if (isActive) {
+    $('overture').hidden = true;
+    turn = addModelTurn();
+    scrollToEnd(true);
+  }
+  toast('끊겼던 응답을 이어받는 중입니다...');
+
+  try {
+    const final = await pollJobToCompletion(
+      pending.endpoint,
+      pending.token,
+      pending.jobId,
+      (job) => {
+        if (!turn) return;
+        if (job.reasoning) turn.showThinking(job.reasoning);
+        if (job.content) { turn.body.innerHTML = renderMarkdown(job.content); scrollToEnd(); }
+      },
+      3 * 60 * 1000
+    );
+    if (final.content?.trim()) {
+      const message = { role: 'assistant', content: final.content };
+      if (final.reasoning?.trim()) message.reasoning = final.reasoning.trim();
+      chat.messages.push(message);
+      chat.at = Date.now();
+      saveChats();
+      paintHistory();
+      if (turn) { turn.el.classList.remove('live'); turn.sealThinking(); }
+      toast('이어받기 완료');
+    } else if (turn) {
+      turn.el.remove();
+    }
+  } catch {
+    if (turn) turn.el.remove();
+    toast('이전 응답을 이어받지 못했습니다');
+  } finally {
+    clearPending();
+  }
+}
+
 /* ------------------------------------------------------------------- boot */
 
 loadConfig();
@@ -1241,6 +1423,7 @@ paintThread();
 paintHistory();
 autoGrow();
 health(true);
+recoverPendingGeneration();
 setInterval(() => { if (!state.stream && !document.hidden) health(true); }, 45000);
 
 if (!state.cfg.endpoint) setTimeout(openSheet, 700);

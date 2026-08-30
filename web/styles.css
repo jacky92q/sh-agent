@@ -311,7 +311,7 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .think-toggle:hover { color: var(--ink-2); }
 .think-toggle svg { width: 13px; height: 13px; transition: transform 0.34s var(--ease); }
 .think.open .think-toggle svg { transform: rotate(90deg); }
-.turn.live .think.open .think-label { animation: fade-pulse 2.1s var(--ease-soft) infinite; }
+.turn.live .think-label { animation: fade-pulse 2.1s var(--ease-soft) infinite; }
 
 .think-fold {
   display: grid;

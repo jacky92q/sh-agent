@@ -35,6 +35,10 @@ const CORS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET,POST,OPTIONS',
   'access-control-allow-headers': 'authorization,content-type',
+  // A cross-origin fetch() only exposes the handful of "simple" response
+  // headers to JS unless the server explicitly lists anything past that —
+  // x-job-id would otherwise silently read back as null.
+  'access-control-expose-headers': 'x-job-id',
   'access-control-max-age': '86400',
   vary: 'origin',
 };
@@ -164,6 +168,103 @@ async function proxy(req, res, path) {
   res.end();
 }
 
+/**
+ * A phone that gets backgrounded mid-answer has its connection to the relay
+ * cut by the OS — that used to mean the answer was gone, because the only
+ * copy of it lived in the reading loop of a fetch() that just died. Chat
+ * completions now get buffered here in memory as they stream, keyed by a
+ * job id, independent of whether the phone is still listening. The client
+ * streams live same as before when it's connected, and can come back later
+ * — even after a full page reload — and ask this relay what the answer
+ * ended up being via GET /v1/jobs/:id.
+ */
+const jobs = new Map(); // id -> { content, reasoning, done, error, createdAt, abort }
+const JOB_TTL_MS = 20 * 60 * 1000;
+
+function pruneJobs() {
+  const cutoff = Date.now() - JOB_TTL_MS;
+  for (const [id, job] of jobs) {
+    if (job.done && job.createdAt < cutoff) jobs.delete(id);
+  }
+}
+
+function parseSseDelta(line, job) {
+  if (!line.startsWith('data:')) return;
+  const payload = line.slice(5).trim();
+  if (!payload || payload === '[DONE]') return;
+  try {
+    const delta = JSON.parse(payload).choices?.[0]?.delta;
+    // Ollama sends this delta as `reasoning`; LM Studio (and OpenAI) call the
+    // same thing `reasoning_content`. Take whichever shows up.
+    const reasoningDelta = delta?.reasoning ?? delta?.reasoning_content;
+    if (reasoningDelta) job.reasoning += reasoningDelta;
+    if (delta?.content) job.content += delta.content;
+  } catch {}
+}
+
+async function handleChatCompletion(req, res) {
+  const body = await readBody(req);
+  pruneJobs();
+
+  const id = randomBytes(9).toString('base64url');
+  const upstreamAbort = new AbortController();
+  const job = { content: '', reasoning: '', done: false, error: null, createdAt: Date.now(), abort: upstreamAbort };
+  jobs.set(id, job);
+
+  // The point of buffering: a closed downstream response must not cancel the
+  // upstream generation. Only an explicit /cancel (the user actually pressing
+  // stop) should do that — see the route below.
+  let downstreamAlive = true;
+  res.on('close', () => { downstreamAlive = false; });
+
+  let upstream;
+  try {
+    upstream = await fetch(`${UPSTREAM}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+      signal: upstreamAbort.signal,
+    });
+  } catch (err) {
+    job.done = true;
+    job.error = err.message;
+    log('\x1b[31mupstream unreachable\x1b[0m', err.message);
+    return send(res, 502, {
+      error: { message: 'Model server is not reachable. Start it with: ollama serve' },
+    });
+  }
+
+  const headers = { ...CORS, 'cache-control': 'no-store', 'x-job-id': id };
+  const ct = upstream.headers.get('content-type');
+  if (ct) headers['content-type'] = ct;
+  if (ct?.includes('event-stream')) headers['x-accel-buffering'] = 'no';
+  res.writeHead(upstream.status, headers);
+
+  if (!upstream.ok || !upstream.body) {
+    job.done = true;
+    if (upstream.body) for await (const chunk of upstream.body) res.write(chunk);
+    return res.end();
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    for await (const chunk of upstream.body) {
+      if (downstreamAlive) {
+        try { res.write(chunk); } catch { downstreamAlive = false; }
+      }
+      buffer += decoder.decode(chunk, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) parseSseDelta(line, job);
+    }
+  } catch (err) {
+    if (!upstreamAbort.signal.aborted) job.error = err.message;
+  }
+  job.done = true;
+  if (downstreamAlive) { try { res.end(); } catch {} }
+}
+
 const server = createServer(async (req, res) => {
   const { pathname } = new URL(req.url, 'http://relay');
 
@@ -193,7 +294,27 @@ const server = createServer(async (req, res) => {
   if (pathname === '/v1/models' && req.method === 'GET') return proxy(req, res, '/v1/models');
   if (pathname === '/v1/chat/completions' && req.method === 'POST') {
     log(`\x1b[36m→\x1b[0m ${who}`);
-    return proxy(req, res, '/v1/chat/completions');
+    return handleChatCompletion(req, res);
+  }
+
+  const jobMatch = pathname.match(/^\/v1\/jobs\/([A-Za-z0-9_-]+)(\/cancel)?$/);
+  if (jobMatch) {
+    const job = jobs.get(jobMatch[1]);
+    if (!job) return send(res, 404, { error: { message: 'Unknown or expired job.' } });
+
+    if (jobMatch[2] && req.method === 'POST') {
+      if (!job.done) job.abort.abort();
+      return send(res, 200, { ok: true });
+    }
+    if (!jobMatch[2] && req.method === 'GET') {
+      return send(res, 200, {
+        id: jobMatch[1],
+        done: job.done,
+        content: job.content,
+        reasoning: job.reasoning,
+        error: job.error,
+      });
+    }
   }
 
   return send(res, 404, { error: { message: `No route for ${pathname}` } });
