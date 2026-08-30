@@ -183,12 +183,19 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .turn { animation: turn-in 0.5s var(--ease) both; }
 
 .turn.user {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
   align-self: flex-end;
   max-width: 84%;
+  gap: 5px;
+}
+.turn.user .bubble {
   padding: 11px 16px;
   border: 1px solid var(--line);
   border-radius: 20px 20px 7px 20px;
   background: var(--surface);
+  max-width: 100%;
 }
 .turn.user .user-text { white-space: pre-wrap; word-break: break-word; }
 .turn.user .user-text:not(:first-child) { margin-top: 9px; }
@@ -207,6 +214,59 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
   transition: filter 0.2s var(--ease);
 }
 .turn.user .user-images img:hover { filter: brightness(1.06); }
+
+/* editing a sent message in place ------------------------------------------ */
+.edit-box {
+  width: min(100%, 60vw);
+  min-width: 220px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+  line-height: 1.55;
+  resize: vertical;
+}
+.edit-box:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.edit-actions { display: flex; gap: 8px; }
+.edit-actions button {
+  padding: 6px 13px;
+  border-radius: 9px;
+  font-size: 0.78rem;
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+}
+.edit-actions button:hover { color: var(--ink); background: var(--surface); }
+.edit-actions .edit-save { border-color: transparent; background: var(--accent); color: #fff; }
+.edit-actions .edit-save:hover { color: #fff; filter: brightness(1.08); }
+
+/* per-turn action row -------------------------------------------------------
+   Always present, never hidden behind hover — hover has no equivalent on
+   touch, and this app is mobile-first. */
+.turn-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0.6;
+  transition: opacity 0.2s var(--ease);
+}
+.turn-actions:hover { opacity: 1; }
+.turn.user .turn-actions { justify-content: flex-end; }
+.turn.live .turn-actions { display: none; }
+.turn-action {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: var(--ink-3);
+  transition: background 0.2s var(--ease), color 0.2s var(--ease);
+}
+.turn-action:hover { background: var(--surface); color: var(--ink); }
+.turn-action svg { width: 14px; height: 14px; stroke-width: 1.7; }
+.turn-action.done { color: #58b37a; }
+.turn-action.danger:hover { color: #c9615f; }
 
 .turn.model { display: flex; flex-direction: column; gap: 9px; }
 
@@ -343,7 +403,10 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .notice {
   align-self: center;
   max-width: 100%;
-  padding: 9px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px 9px 14px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--surface);
@@ -352,6 +415,20 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
   text-align: center;
 }
 .notice b { color: var(--accent); font-weight: 600; }
+.notice-retry {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+.notice-retry:hover { background: var(--bg-veil); }
+.notice-retry svg { width: 13px; height: 13px; }
 
 /* --------------------------------------------------------------- overture */
 .overture {

@@ -209,6 +209,18 @@ const DOC_ICON =
 const AUDIO_ICON =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4M8 6v12M12 9v6M16 4v16M20 10v4"/></svg>';
 
+// Per-turn action icons — kept tiny and shared across every message, so a
+// touch target stays consistent whether it's copy, edit, retry, or delete.
+const ICON_COPY =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+const ICON_CHECK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>';
+const ICON_EDIT =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+const ICON_TRASH =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>';
+const ICON_RETRY =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>';
+
 function renderAttachStrip() {
   const strip = $('attachStrip');
   strip.replaceChildren();
@@ -421,9 +433,13 @@ stage.addEventListener('scroll', () => {
   state.stickToBottom = stage.scrollHeight - stage.scrollTop - stage.clientHeight < 130;
 });
 
-function addUserTurn(text, images = [], docs = [], audios = []) {
+function addUserTurn(text, images = [], docs = [], audios = [], id = null) {
   const el = document.createElement('div');
   el.className = 'turn user';
+  if (id) el.dataset.msgId = id;
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
 
   if (docs.length) {
     const row = document.createElement('div');
@@ -435,7 +451,7 @@ function addUserTurn(text, images = [], docs = [], audios = []) {
       badge.innerHTML = `${DOC_ICON}<span class="doc-name">${esc(doc.name)}</span>`;
       row.append(badge);
     }
-    el.append(row);
+    bubble.append(row);
   }
   if (audios.length) {
     const row = document.createElement('div');
@@ -447,7 +463,7 @@ function addUserTurn(text, images = [], docs = [], audios = []) {
       player.src = audio.dataUrl;
       row.append(player);
     }
-    el.append(row);
+    bubble.append(row);
   }
   if (images.length) {
     const grid = document.createElement('div');
@@ -459,14 +475,28 @@ function addUserTurn(text, images = [], docs = [], audios = []) {
       img.loading = 'lazy';
       grid.append(img);
     }
-    el.append(grid);
+    bubble.append(grid);
   }
   if (text) {
     const p = document.createElement('div');
     p.className = 'user-text';
     p.textContent = text;
-    el.append(p);
+    bubble.append(p);
   }
+  el.append(bubble);
+
+  if (id) {
+    const actions = document.createElement('div');
+    actions.className = 'turn-actions';
+    actions.innerHTML =
+      (text
+        ? `<button class="turn-action" type="button" data-act="copy" aria-label="복사">${ICON_COPY}</button>`
+        : '') +
+      `<button class="turn-action" type="button" data-act="edit" aria-label="수정">${ICON_EDIT}</button>` +
+      `<button class="turn-action danger" type="button" data-act="delete" aria-label="삭제">${ICON_TRASH}</button>`;
+    el.append(actions);
+  }
+
   thread.appendChild(el);
   return el;
 }
@@ -542,9 +572,10 @@ function latestThinkingPhase(text) {
  * folded away the moment real content starts — the full trace stays behind
  * the toggle the whole time, open only if someone taps it.
  */
-function addModelTurn() {
+function addModelTurn(id = null) {
   const el = document.createElement('div');
   el.className = 'turn model live';
+  if (id) el.dataset.msgId = id;
 
   const byline = document.createElement('div');
   byline.className = 'byline';
@@ -563,7 +594,14 @@ function addModelTurn() {
   body.className = 'body';
   body.innerHTML = '<span class="thinking"><i></i><i></i><i></i></span>';
 
-  el.append(byline, think, body);
+  const actions = document.createElement('div');
+  actions.className = 'turn-actions';
+  actions.innerHTML =
+    `<button class="turn-action" type="button" data-act="copy" aria-label="복사">${ICON_COPY}</button>` +
+    `<button class="turn-action" type="button" data-act="regenerate" aria-label="다시 생성">${ICON_RETRY}</button>` +
+    `<button class="turn-action danger" type="button" data-act="delete" aria-label="삭제">${ICON_TRASH}</button>`;
+
+  el.append(byline, think, body, actions);
   thread.appendChild(el);
 
   const toggle = think.querySelector('.think-toggle');
@@ -579,6 +617,7 @@ function addModelTurn() {
   return {
     el,
     body,
+    setId(newMsgId) { el.dataset.msgId = newMsgId; },
     showThinking(text) {
       // Reveal the collapsed summary bar; never force it open — that was the
       // whole point, the raw trace only shows up if someone taps for it.
@@ -601,10 +640,18 @@ function addModelTurn() {
   };
 }
 
-function addNotice(html) {
+function addNotice(html, { retry = false } = {}) {
   const el = document.createElement('div');
   el.className = 'turn notice';
   el.innerHTML = html;
+  if (retry) {
+    const btn = document.createElement('button');
+    btn.className = 'notice-retry';
+    btn.type = 'button';
+    btn.innerHTML = `${ICON_RETRY}<span>다시 시도</span>`;
+    btn.addEventListener('click', () => { el.remove(); retryLast(); });
+    el.append(btn);
+  }
   thread.appendChild(el);
   scrollToEnd(true);
 }
@@ -614,12 +661,22 @@ function paintThread() {
   const chat = activeChat();
   const msgs = chat ? chat.messages : [];
   $('overture').hidden = msgs.length > 0;
+
+  // Chats saved before per-message actions existed have no id to hang a
+  // copy/edit/delete button on — hand out one now, once, rather than every
+  // repaint.
+  let needsSave = false;
+  for (const m of msgs) {
+    if (!m.id) { m.id = newId(); needsSave = true; }
+  }
+  if (needsSave) saveChats();
+
   for (const m of msgs) {
     if (m.role === 'user') {
       const { text, images, docs, audios } = partsOf(m.content);
-      addUserTurn(text, images, docs, audios);
+      addUserTurn(text, images, docs, audios, m.id);
     } else {
-      const turn = addModelTurn();
+      const turn = addModelTurn(m.id);
       turn.el.classList.remove('live');
       turn.el.style.animation = 'none';
       if (m.reasoning) {
@@ -632,19 +689,96 @@ function paintThread() {
   requestAnimationFrame(() => scrollToEnd(true));
 }
 
+/** Puts a user turn's bubble into an inline textarea, wired to resend on save. */
+function startEdit(turnEl, id) {
+  const chat = activeChat();
+  const msg = chat?.messages.find((m) => m.id === id);
+  if (!msg) return;
+  const parts = partsOf(msg.content);
+
+  const bubble = turnEl.querySelector('.bubble');
+  const textEl = bubble.querySelector('.user-text');
+  const actions = turnEl.querySelector('.turn-actions');
+  if (!bubble || !actions) return;
+
+  const textarea = document.createElement('textarea');
+  textarea.className = 'edit-box';
+  textarea.rows = Math.min(10, Math.max(2, parts.text.split('\n').length + 1));
+  textarea.value = parts.text;
+  if (textEl) textEl.replaceWith(textarea);
+  else bubble.append(textarea);
+  textarea.focus();
+  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+
+  actions.className = 'edit-actions';
+  actions.innerHTML =
+    '<button class="edit-cancel" type="button">취소</button>' +
+    '<button class="edit-save" type="button">다시 보내기</button>';
+
+  const cancel = () => paintThread(); // simplest reliable way back to the read view
+  actions.querySelector('.edit-cancel').addEventListener('click', cancel);
+  actions.querySelector('.edit-save').addEventListener('click', () => {
+    const text = textarea.value.trim();
+    if (!text && !parts.images.length && !parts.docs.length && !parts.audios.length) return;
+    editAndResend(id, text);
+  });
+  textarea.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
+      ev.preventDefault();
+      actions.querySelector('.edit-save').click();
+    } else if (ev.key === 'Escape') {
+      cancel();
+    }
+  });
+}
+
 thread.addEventListener('click', async (e) => {
   const img = e.target.closest('.user-images img');
   if (img) { openLightbox(img.src); return; }
 
-  const btn = e.target.closest('.copy');
-  if (!btn) return;
-  const code = btn.parentElement.querySelector('code');
-  try {
-    await navigator.clipboard.writeText(code.innerText);
-    btn.textContent = '복사됨';
-    setTimeout(() => (btn.textContent = '복사'), 1400);
-  } catch {
-    toast('클립보드를 사용할 수 없습니다');
+  const codeCopyBtn = e.target.closest('.code-block .copy');
+  if (codeCopyBtn) {
+    const code = codeCopyBtn.parentElement.querySelector('code');
+    try {
+      await navigator.clipboard.writeText(code.innerText);
+      codeCopyBtn.textContent = '복사됨';
+      setTimeout(() => (codeCopyBtn.textContent = '복사'), 1400);
+    } catch {
+      toast('클립보드를 사용할 수 없습니다');
+    }
+    return;
+  }
+
+  const actionBtn = e.target.closest('.turn-action');
+  if (!actionBtn) return;
+  const turnEl = actionBtn.closest('.turn');
+  const id = turnEl?.dataset.msgId;
+  if (!id) return;
+  const act = actionBtn.dataset.act;
+
+  if (act === 'copy') {
+    const chat = activeChat();
+    const msg = chat?.messages.find((m) => m.id === id);
+    if (!msg) return;
+    const text = msg.role === 'user' ? partsOf(msg.content).text : msg.content;
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      actionBtn.innerHTML = ICON_CHECK;
+      actionBtn.classList.add('done');
+      setTimeout(() => {
+        actionBtn.innerHTML = ICON_COPY;
+        actionBtn.classList.remove('done');
+      }, 1200);
+    } catch {
+      toast('클립보드를 사용할 수 없습니다');
+    }
+  } else if (act === 'delete') {
+    deleteMessage(id);
+  } else if (act === 'edit') {
+    startEdit(turnEl, id);
+  } else if (act === 'regenerate') {
+    regenerateFrom(id);
   }
 });
 
@@ -734,23 +868,17 @@ async function pollJobToCompletion(endpoint, token, jobId, onUpdate, maxMs = 10 
   }
 }
 
-async function send(text, images = [], docs = [], audios = []) {
+/**
+ * Runs a completion against chat.messages exactly as they currently stand
+ * and streams the reply into a fresh turn. This is the one place that talks
+ * to the model — send() (a new user message), regenerateFrom() (redo from a
+ * point in history), and retryLast() (recover from a failure) all end here,
+ * differing only in what's already in chat.messages when they call it.
+ */
+async function runCompletion(chat) {
   if (state.stream) return;
   const { endpoint, token } = state.cfg;
   if (!endpoint) { openSheet(); toast('서버 주소를 먼저 입력하세요'); return; }
-
-  const chat = ensureChat();
-  if (chat.messages.length === 0) {
-    chat.title = text.replace(/\s+/g, ' ').slice(0, 42) || docs[0]?.name || (audios.length ? '음성 메시지' : '이미지 메시지');
-  }
-  chat.messages.push({ role: 'user', content: toStored(text, images, docs, audios) });
-  chat.at = Date.now();
-  saveChats();
-  paintHistory();
-
-  $('overture').hidden = true;
-  addUserTurn(text, images, docs, audios);
-  scrollToEnd(true);
 
   const turn = addModelTurn();
   state.stickToBottom = true;
@@ -787,16 +915,17 @@ async function send(text, images = [], docs = [], audios = []) {
     requestAnimationFrame(paint);
   };
 
-  /** Persist the finished turn. Returns false when nothing was produced. */
+  /** Persist the finished turn and wire its action buttons up. Null if empty. */
   const commit = () => {
-    if (!acc.trim()) return false;
-    const message = { role: 'assistant', content: acc };
+    if (!acc.trim()) return null;
+    const message = { id: newId(), role: 'assistant', content: acc };
     if (reasoning.trim()) message.reasoning = reasoning.trim();
     chat.messages.push(message);
     chat.at = Date.now();
     saveChats();
     paintHistory();
-    return true;
+    turn.setId(message.id);
+    return message;
   };
 
   let jobId = null;
@@ -868,10 +997,9 @@ async function send(text, images = [], docs = [], audios = []) {
 
     paint();
     clearPending();
-    commit();
-    if (!acc.trim()) {
+    if (!commit()) {
       turn.el.remove();
-      addNotice('모델이 빈 응답을 보냈습니다.');
+      addNotice('모델이 빈 응답을 보냈습니다.', { retry: true });
     }
   } catch (err) {
     if (controller.signal.aborted) {
@@ -892,17 +1020,17 @@ async function send(text, images = [], docs = [], audios = []) {
         paint();
         clearPending();
         if (commit()) toast('연결이 끊겼지만 응답을 이어받았습니다');
-        else { turn.el.remove(); addNotice('모델이 빈 응답을 보냈습니다.'); }
+        else { turn.el.remove(); addNotice('모델이 빈 응답을 보냈습니다.', { retry: true }); }
       } catch (e2) {
         clearPending();
-        if (commit()) addNotice('<b>연결이 끊겼습니다</b> · 여기까지만 받았습니다');
-        else { turn.el.remove(); addNotice(`<b>실패</b> · ${esc(e2.message)}`); }
+        if (commit()) addNotice('<b>연결이 끊겼습니다</b> · 여기까지만 받았습니다', { retry: true });
+        else { turn.el.remove(); addNotice(`<b>실패</b> · ${esc(e2.message)}`, { retry: true }); }
       }
     } else if (commit()) {
-      addNotice('<b>연결이 끊겼습니다</b> · 여기까지만 받았습니다');
+      addNotice('<b>연결이 끊겼습니다</b> · 여기까지만 받았습니다', { retry: true });
     } else {
       turn.el.remove();
-      addNotice(`<b>실패</b> · ${esc(err.message)}`);
+      addNotice(`<b>실패</b> · ${esc(err.message)}`, { retry: true });
     }
   } finally {
     turn.el.classList.remove('live');
@@ -911,6 +1039,81 @@ async function send(text, images = [], docs = [], audios = []) {
     setBusy(false);
     health(true);
   }
+}
+
+async function send(text, images = [], docs = [], audios = []) {
+  if (state.stream) return;
+  if (!state.cfg.endpoint) { openSheet(); toast('서버 주소를 먼저 입력하세요'); return; }
+
+  const chat = ensureChat();
+  if (chat.messages.length === 0) {
+    chat.title = text.replace(/\s+/g, ' ').slice(0, 42) || docs[0]?.name || (audios.length ? '음성 메시지' : '이미지 메시지');
+  }
+  const userMsg = { id: newId(), role: 'user', content: toStored(text, images, docs, audios) };
+  chat.messages.push(userMsg);
+  chat.at = Date.now();
+  saveChats();
+  paintHistory();
+
+  $('overture').hidden = true;
+  addUserTurn(text, images, docs, audios, userMsg.id);
+  scrollToEnd(true);
+
+  await runCompletion(chat);
+}
+
+/** Removes a message and everything after it from history, then re-renders. */
+function truncateFrom(chat, id) {
+  const idx = chat.messages.findIndex((m) => m.id === id);
+  if (idx === -1) return false;
+  chat.messages.length = idx;
+  chat.at = Date.now();
+  saveChats();
+  paintThread();
+  paintHistory();
+  return true;
+}
+
+/** Regenerates from a specific turn on — discards it and everything after, then reruns. */
+async function regenerateFrom(id) {
+  const chat = activeChat();
+  if (!chat || state.stream) return;
+  if (!truncateFrom(chat, id)) return;
+  await runCompletion(chat);
+}
+
+/** Recovers from a failed or stopped generation: redo the last exchange. */
+async function retryLast() {
+  const chat = activeChat();
+  if (!chat || state.stream) return;
+  const last = chat.messages[chat.messages.length - 1];
+  if (!last) return;
+  if (last.role === 'assistant' && !truncateFrom(chat, last.id)) return;
+  await runCompletion(chat);
+}
+
+/** Edits a past user message in place: cuts history from there and resends. */
+async function editAndResend(id, newText) {
+  const chat = activeChat();
+  if (!chat || state.stream) return;
+  const msg = chat.messages.find((m) => m.id === id);
+  if (!msg) return;
+  const { images, docs, audios } = partsOf(msg.content);
+  if (!truncateFrom(chat, id)) return;
+  await send(newText, images, docs, audios);
+}
+
+/** Removes a single message, leaving the rest of the conversation as-is. */
+function deleteMessage(id) {
+  const chat = activeChat();
+  if (!chat) return;
+  const idx = chat.messages.findIndex((m) => m.id === id);
+  if (idx === -1) return;
+  chat.messages.splice(idx, 1);
+  chat.at = Date.now();
+  saveChats();
+  paintThread();
+  paintHistory();
 }
 
 function setBusy(busy) {
