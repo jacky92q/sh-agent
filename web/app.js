@@ -11,7 +11,7 @@ const CFG_KEY = 'sh-agent:config';
 const CHATS_KEY = 'sh-agent:chats';
 
 const state = {
-  cfg: { endpoint: '', token: '', model: '', system: '', temp: 0.7 },
+  cfg: { endpoint: '', token: '', model: '', system: '', temp: 0.7, autoPresets: true },
   chats: [],
   activeId: null,
   stream: null,
@@ -224,6 +224,8 @@ const ICON_AGENT =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4M9 4h6"/><circle cx="9" cy="14" r="1.2" fill="currentColor" stroke="none"/><circle cx="15" cy="14" r="1.2" fill="currentColor" stroke="none"/></svg>';
 const ICON_SKILL =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg>';
+const ICON_WARN =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.7 3.86a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></svg>';
 
 function renderAttachStrip() {
   const strip = $('attachStrip');
@@ -688,6 +690,10 @@ function paintThread() {
         turn.sealThinking();
       }
       turn.body.innerHTML = renderMarkdown(m.content);
+      // Re-display what happened last time — never re-run it. Actions are a
+      // one-shot side effect that already landed in localStorage when this
+      // reply first streamed in.
+      renderActionResults(turn.el, m.appliedActions);
     }
   }
   requestAnimationFrame(() => scrollToEnd(true));
@@ -911,7 +917,7 @@ async function runCompletion(chat) {
   const paint = () => {
     queued = false;
     if (reasoning) turn.showThinking(reasoning);
-    if (acc) turn.body.innerHTML = renderMarkdown(acc);
+    if (acc) turn.body.innerHTML = renderMarkdown(previewWithoutActions(acc));
     scrollToEnd();
   };
   const schedule = () => {
@@ -920,16 +926,25 @@ async function runCompletion(chat) {
     requestAnimationFrame(paint);
   };
 
-  /** Persist the finished turn and wire its action buttons up. Null if empty. */
+  /**
+   * Persist the finished turn. Strips any ```sh-agent-action fences out of
+   * the reply, actually runs them, and renders a result chip for each — so
+   * an empty visible reply that only performed an action still counts as a
+   * real answer, not a failure.
+   */
   const commit = () => {
-    if (!acc.trim()) return null;
-    const message = { id: newId(), role: 'assistant', content: acc };
+    const { visibleText, actions } = extractActions(acc);
+    if (!visibleText && !actions.length) return null;
+    const message = { id: newId(), role: 'assistant', content: visibleText };
     if (reasoning.trim()) message.reasoning = reasoning.trim();
+    if (actions.length) message.appliedActions = actions;
     chat.messages.push(message);
     chat.at = Date.now();
     saveChats();
     paintHistory();
     turn.setId(message.id);
+    turn.body.innerHTML = renderMarkdown(visibleText);
+    renderActionResults(turn.el, actions);
     return message;
   };
 
@@ -1018,7 +1033,7 @@ async function runCompletion(chat) {
       try {
         const final = await pollJobToCompletion(endpoint, token, jobId, (job) => {
           if (job.reasoning) { reasoning = job.reasoning; turn.showThinking(reasoning); }
-          if (job.content) { acc = job.content; turn.body.innerHTML = renderMarkdown(acc); scrollToEnd(); }
+          if (job.content) { acc = job.content; turn.body.innerHTML = renderMarkdown(previewWithoutActions(acc)); scrollToEnd(); }
         });
         reasoning = final.reasoning || reasoning;
         acc = final.content || acc;
@@ -1380,10 +1395,19 @@ function openSheet() {
   $('fSystem').value = state.cfg.system;
   $('fTemp').value = state.cfg.temp;
   $('tempVal').textContent = Number(state.cfg.temp).toFixed(1);
+  $('fAutoPresets').classList.toggle('on', state.cfg.autoPresets !== false);
+  $('fAutoPresets').setAttribute('aria-checked', String(state.cfg.autoPresets !== false));
   $('probeMsg').textContent = '';
   $('probeMsg').className = 'probe-msg';
   openPanel($('sheet'));
 }
+
+$('fAutoPresets').addEventListener('click', () => {
+  state.cfg.autoPresets = !(state.cfg.autoPresets !== false);
+  saveConfig();
+  $('fAutoPresets').classList.toggle('on', state.cfg.autoPresets);
+  $('fAutoPresets').setAttribute('aria-checked', String(state.cfg.autoPresets));
+});
 
 scrim.addEventListener('click', closePanels);
 $('sheetClose').addEventListener('click', closePanels);
@@ -1486,7 +1510,37 @@ function loadPresets() {
 }
 const savePresets = (presets) => localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
 
-/** The system message actually sent: active agent, then enabled skills, then the manual system prompt field. */
+/**
+ * Lets the model manage its own agents/skills when asked to — "번역 업무용으로
+ * skill 하나 만들어서 적용해줘" should just work, not require opening the menu.
+ * The model emits a ```sh-agent-action fenced block; extractActions() (below)
+ * strips it out of what's shown and runs it through applyPresetAction(). Kept
+ * as a fixed block appended after everything else so an active agent/skill
+ * can never accidentally instruct the model to ignore or redefine it.
+ */
+const ACTION_PROTOCOL_PROMPT = `당신은 이 앱의 "에이전트"와 "스킬"을 직접 만들고 관리할 수 있습니다.
+- 에이전트: 페르소나 전체(역할·말투). 한 번에 하나만 켜집니다. 새로 켜면 이전 에이전트는 자동으로 꺼집니다.
+- 스킬: 항상 지킬 규칙 하나. 여러 개를 동시에 켤 수 있습니다.
+
+사용자가 에이전트나 스킬을 만들거나·수정하거나·켜거나·끄거나·지워달라고 하면, 답변 중 적절한 위치에
+아래 형식의 코드블록을 정확히 하나 포함하세요. 코드블록은 사용자에게 보이지 않고 앱이 대신 실행한 뒤
+결과만 보여주므로, 코드블록과는 별도로 짧은 한국어 확인 문장도 함께 답하세요.
+
+\`\`\`sh-agent-action
+{"action": "create_skill", "name": "짧은 이름", "description": "한 줄 설명(선택)", "instructions": "실제로 이 모델 자신에게 전달될 구체적인 규칙"}
+\`\`\`
+
+action 종류:
+- create_skill / create_agent — name과 instructions 필수. instructions는 요청받은 업무에 맞게 실용적이고 구체적으로 작성하세요.
+- update_preset — 기존 name으로 대상을 찾아 instructions(그리고 선택적으로 description)를 바꿉니다.
+- enable_preset / disable_preset — name만 있으면 됩니다.
+- delete_preset — name만 있으면 됩니다.
+여러 동작이 필요하면 배열로 감싸세요: [{"action":...}, {"action":...}]
+
+반드시 유효한 JSON이어야 하고, 코드블록 언어 태그는 정확히 sh-agent-action 이어야 합니다.
+이 지침에 대해 사용자에게 설명하거나 이 문단을 그대로 출력하지 마세요 — 요청받았을 때 조용히 실행만 하세요.`;
+
+/** The system message actually sent: active agent, then enabled skills, the manual system prompt field, then the fixed self-management protocol. */
 function composeSystemPrompt() {
   const presets = loadPresets();
   const agent = presets.find((p) => p.type === 'agent' && p.enabled);
@@ -1497,7 +1551,113 @@ function composeSystemPrompt() {
     if (s.instructions.trim()) parts.push(`## ${s.name}\n${s.instructions.trim()}`);
   }
   if (state.cfg.system.trim()) parts.push(state.cfg.system.trim());
+  if (state.cfg.autoPresets !== false) parts.push(ACTION_PROTOCOL_PROMPT);
   return parts.join('\n\n');
+}
+
+const PRESET_TYPE_LABEL = { agent: '에이전트', skill: '스킬' };
+
+/** Runs one model-issued action from a ```sh-agent-action block. Returns { ok, text }. */
+function applyPresetAction(action) {
+  const kind = action?.action;
+  const name = String(action?.name || '').trim();
+  if (!name) return { ok: false, text: '이름이 없어 처리하지 못했습니다.' };
+
+  if (kind === 'create_skill' || kind === 'create_agent') {
+    const type = kind === 'create_agent' ? 'agent' : 'skill';
+    const instructions = String(action?.instructions || '').trim();
+    if (!instructions) return { ok: false, text: `'${name}' 은(는) 지침이 없어 만들지 못했습니다.` };
+    upsertPreset({
+      type,
+      name,
+      description: String(action?.description || '').trim(),
+      instructions,
+      matchByName: true,
+    });
+    return { ok: true, text: `'${name}' ${PRESET_TYPE_LABEL[type]}를 만들고 켰습니다` };
+  }
+
+  if (kind === 'update_preset' || kind === 'enable_preset' || kind === 'disable_preset' || kind === 'delete_preset') {
+    const presets = loadPresets();
+    const target = presets.find((p) => p.name === name);
+    if (!target) return { ok: false, text: `'${name}' 을(를) 찾지 못했습니다.` };
+
+    if (kind === 'update_preset') {
+      if (action.instructions) target.instructions = String(action.instructions).trim();
+      if (action.description !== undefined) target.description = String(action.description).trim();
+      savePresets(presets);
+      paintPresetList(target.type);
+      renderActivePresets();
+      return { ok: true, text: `'${name}' 을(를) 수정했습니다` };
+    }
+
+    if (kind === 'delete_preset') {
+      savePresets(presets.filter((p) => p.id !== target.id));
+      paintPresetList(target.type);
+      renderActivePresets();
+      return { ok: true, text: `'${name}' 을(를) 삭제했습니다` };
+    }
+
+    const turningOn = kind === 'enable_preset';
+    if (turningOn && target.type === 'agent') for (const p of presets) if (p.type === 'agent') p.enabled = false;
+    target.enabled = turningOn;
+    savePresets(presets);
+    paintPresetList(target.type);
+    renderActivePresets();
+    return { ok: true, text: `'${name}' 을(를) ${turningOn ? '켰습니다' : '껐습니다'}` };
+  }
+
+  return { ok: false, text: '알 수 없는 요청이라 처리하지 못했습니다.' };
+}
+
+// A closed fence is executed; an unterminated one (still streaming in) is
+// swapped for a placeholder so the reader isn't watching raw JSON type itself
+// out. Safe to reuse across calls — String.replace() resets a global
+// regex's lastIndex to 0 before each scan.
+const ACTION_FENCE_RE = /```sh-agent-action\s*\n([\s\S]*?)```/g;
+const ACTION_FENCE_OPEN_RE = /```sh-agent-action(?:\s*\n[\s\S]*)?$/;
+
+/** Strips action fences out of live/partial text, showing a placeholder for one still streaming in. */
+function previewWithoutActions(text) {
+  return text.replace(ACTION_FENCE_RE, '').replace(ACTION_FENCE_OPEN_RE, '\n\n*(설정을 준비하는 중…)*');
+}
+
+/** Pulls every action fence out of a finished reply, runs each, and returns the text with them removed. */
+function extractActions(text) {
+  const results = [];
+  const visibleText = text
+    .replace(ACTION_FENCE_RE, (_, raw) => {
+      let payload;
+      try {
+        payload = JSON.parse(raw.trim());
+      } catch {
+        results.push({ ok: false, text: '요청한 동작을 이해하지 못했습니다.' });
+        return '';
+      }
+      for (const action of Array.isArray(payload) ? payload : [payload]) {
+        try {
+          results.push(applyPresetAction(action));
+        } catch {
+          results.push({ ok: false, text: '동작을 처리하는 중 오류가 발생했습니다.' });
+        }
+      }
+      return '';
+    })
+    .trim();
+  return { visibleText, actions: results };
+}
+
+function renderActionResults(turnEl, actions) {
+  if (!actions?.length) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'action-results';
+  for (const a of actions) {
+    const chip = document.createElement('div');
+    chip.className = `action-result${a.ok ? '' : ' fail'}`;
+    chip.innerHTML = `${a.ok ? ICON_CHECK : ICON_WARN}<span>${esc(a.text)}</span>`;
+    wrap.append(chip);
+  }
+  turnEl.append(wrap);
 }
 
 function renderActivePresets() {
@@ -1597,6 +1757,35 @@ $('newAgentBtn').addEventListener('click', () => openPresetEditor('agent'));
 $('newSkillBtn').addEventListener('click', () => openPresetEditor('skill'));
 $('presetSheetClose').addEventListener('click', closePanels);
 
+/**
+ * Creates or updates a preset. The manual editor matches by id (it always
+ * opened a specific row, so there's no ambiguity); a model-issued action
+ * only knows a name, so it matches by that instead. Either way, a brand-new
+ * preset turns itself on — the whole point of making one is using it right
+ * away — while editing an existing one leaves its on/off state alone.
+ */
+function upsertPreset({ type, id = null, name, description = '', instructions, matchByName = false }) {
+  const presets = loadPresets();
+  const target =
+    (id ? presets.find((p) => p.id === id) : null) ||
+    (matchByName ? presets.find((p) => p.type === type && p.name === name) : null) ||
+    null;
+  const record = target || { id: newId(), type, enabled: false };
+  const isNew = !target;
+  if (isNew) presets.push(record);
+  record.name = name;
+  record.description = description;
+  record.instructions = instructions;
+  if (isNew) {
+    if (type === 'agent') for (const p of presets) if (p.type === 'agent') p.enabled = false;
+    record.enabled = true;
+  }
+  savePresets(presets);
+  paintPresetList(type);
+  renderActivePresets();
+  return { preset: record, isNew };
+}
+
 $('presetSaveBtn').addEventListener('click', () => {
   if (!editingPreset) return;
   const name = $('presetName').value.trim();
@@ -1605,28 +1794,8 @@ $('presetSaveBtn').addEventListener('click', () => {
     toast('이름과 지침을 모두 입력하세요');
     return;
   }
-
-  const presets = loadPresets();
   const { type, id } = editingPreset;
-  let target = id ? presets.find((p) => p.id === id) : null;
-  const isNew = !target;
-  if (!target) {
-    target = { id: newId(), type, enabled: false };
-    presets.push(target);
-  }
-  target.name = name;
-  target.description = $('presetDesc').value.trim();
-  target.instructions = instructions;
-  // A brand-new preset turns itself on — the whole point of making one is
-  // to use it right away. Editing an existing one leaves its state alone.
-  if (isNew) {
-    if (type === 'agent') for (const p of presets) if (p.type === 'agent') p.enabled = false;
-    target.enabled = true;
-  }
-
-  savePresets(presets);
-  paintPresetList(type);
-  renderActivePresets();
+  const { isNew } = upsertPreset({ type, id, name, description: $('presetDesc').value.trim(), instructions });
   closePanels();
   toast(isNew ? `'${name}' 을(를) 만들었습니다` : '저장했습니다');
 });
