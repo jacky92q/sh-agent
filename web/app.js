@@ -16,6 +16,7 @@ const state = {
   activeId: null,
   stream: null,
   stickToBottom: true,
+  pairingFailed: false,
 };
 
 /* ------------------------------------------------------------- persistence */
@@ -24,20 +25,42 @@ function loadConfig() {
   try {
     Object.assign(state.cfg, JSON.parse(localStorage.getItem(CFG_KEY) || '{}'));
   } catch {}
-  // A pairing link carries the endpoint + key in the fragment, which never
-  // leaves the browser. Consume it, then scrub it from the address bar.
-  const m = location.hash.match(/[#&]c=([A-Za-z0-9_-]+)/);
-  if (m) {
-    try {
-      const json = atob(m[1].replace(/-/g, '+').replace(/_/g, '/'));
-      const paired = JSON.parse(json);
-      if (paired.e) state.cfg.endpoint = String(paired.e).replace(/\/+$/, '');
-      if (paired.t) state.cfg.token = String(paired.t);
-      saveConfig();
-      history.replaceState(null, '', location.pathname + location.search);
-      toast('연결 정보를 불러왔습니다');
-    } catch {}
+}
+
+/** Decodes the blob a pairing link carries. Returns false if it is not one. */
+function applyPairing(blob) {
+  try {
+    const paired = JSON.parse(atob(blob.replace(/-/g, '+').replace(/_/g, '/')));
+    if (!paired.e) return false;
+    state.cfg.endpoint = String(paired.e).replace(/\/+$/, '');
+    if (paired.t) state.cfg.token = String(paired.t);
+    saveConfig();
+    return true;
+  } catch {
+    return false;
   }
+}
+
+/**
+ * The pairing link keeps the server address and key in the fragment, which the
+ * browser never sends anywhere. Read it, then scrub it from the address bar.
+ * Messengers love to truncate long links, so a half-eaten one says so rather
+ * than dumping the reader into a blank form.
+ */
+function consumeHash() {
+  const hash = location.hash;
+  if (!/[#&]c=/.test(hash)) return false;
+
+  const m = hash.match(/[#&]c=([A-Za-z0-9_-]+)/);
+  if (!m || !applyPairing(m[1])) {
+    state.pairingFailed = true;
+    toast('페어링 링크가 잘렸거나 손상되었습니다');
+    return false;
+  }
+  state.pairingFailed = false;
+  history.replaceState(null, '', location.pathname + location.search);
+  toast('연결 정보를 불러왔습니다');
+  return true;
 }
 
 const saveConfig = () => localStorage.setItem(CFG_KEY, JSON.stringify(state.cfg));
@@ -536,7 +559,15 @@ function closePanels() {
   conceal(scrim, 360);
 }
 
+const HINT_FRESH =
+  'PC에서 <code>start.ps1</code>을 실행하면 나오는 페어링 링크를 폰에서 열면 아래가 자동으로 채워집니다.';
+const HINT_BROKEN =
+  '링크가 중간에 잘린 것 같습니다. 메신저가 긴 주소를 자르는 경우가 많습니다. ' +
+  '<b>링크 전체를 복사해 아래 서버 주소 칸에 그대로 붙여넣으면</b> 나머지는 알아서 채워집니다.';
+
 function openSheet() {
+  $('setupHint').hidden = Boolean(state.cfg.endpoint);
+  $('setupHint').innerHTML = state.pairingFailed ? HINT_BROKEN : HINT_FRESH;
   $('fEndpoint').value = state.cfg.endpoint;
   $('fToken').value = state.cfg.token;
   $('fSystem').value = state.cfg.system;
@@ -564,8 +595,23 @@ const commitField = (id, key, transform = (v) => v) => {
   });
 };
 
-commitField('fEndpoint', 'endpoint', (v) => v.trim().replace(/\/+$/, ''));
 commitField('fToken', 'token', (v) => v.trim());
+
+// Pasting the entire pairing link in here is the obvious move when the link
+// itself would not open, so accept that as well as a bare server address.
+$('fEndpoint').addEventListener('change', () => {
+  const raw = $('fEndpoint').value.trim();
+  const paired = raw.match(/[#&]c=([A-Za-z0-9_-]+)/);
+  if (paired && applyPairing(paired[1])) {
+    $('fEndpoint').value = state.cfg.endpoint;
+    $('fToken').value = state.cfg.token;
+    toast('링크에서 연결 정보를 읽었습니다');
+  } else {
+    state.cfg.endpoint = raw.replace(/\/+$/, '');
+    saveConfig();
+  }
+  health(true);
+});
 commitField('fSystem', 'system');
 commitField('fModel', 'model');
 
@@ -704,9 +750,19 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden && !state.stream) health(true);
 });
 
+// Opening a pairing link while this page is already up is a same-document
+// navigation: no reload happens, so the fragment has to be picked up here.
+window.addEventListener('hashchange', () => {
+  if (consumeHash()) {
+    closePanels();
+    health(true);
+  }
+});
+
 /* ------------------------------------------------------------------- boot */
 
 loadConfig();
+consumeHash();
 loadChats();
 state.activeId = state.chats[0]?.id || null;
 paintSeeds();

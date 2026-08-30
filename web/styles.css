@@ -578,6 +578,20 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .sheet-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 2px 16px; }
 .sheet-body { display: flex; flex-direction: column; gap: 17px; padding-bottom: 4px; }
 
+.setup-hint {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  border-radius: 4px 12px 12px 4px;
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+.setup-hint code { font-family: var(--mono); font-size: 0.92em; color: var(--ink); }
+.setup-hint b { color: var(--ink); font-weight: 600; }
+
 .field { display: flex; flex-direction: column; gap: 7px; }
 .field-label { font-size: 0.78rem; color: var(--ink-2); letter-spacing: 0.01em; }
 .field-label b { color: var(--accent); font-variant-numeric: tabular-nums; }
