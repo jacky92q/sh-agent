@@ -40,6 +40,12 @@
 }
 
 * { box-sizing: border-box; }
+/* An author rule that sets `display` on a class beats the UA's default
+ * `[hidden] { display: none }` at equal specificity, so any hidden-toggled
+ * element with its own display (flex/grid/etc.) quietly stays laid out and
+ * hit-testable — invisible, but still eating every click and scroll behind
+ * it. !important makes hidden win outright, unconditionally, everywhere. */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 
 body {
@@ -354,7 +360,6 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
   padding: clamp(40px, 13vh, 110px) 24px 30px;
   text-align: center;
 }
-.overture[hidden] { display: none; }
 
 .overture-mark {
   position: relative;
@@ -419,7 +424,6 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
   margin: 0 auto 8px;
   padding: 0 max(14px, env(safe-area-inset-left)) 2px max(14px, env(safe-area-inset-right));
 }
-.attach-strip[hidden] { display: none; }
 
 .attach-chip {
   position: relative;
