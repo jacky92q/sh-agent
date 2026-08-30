@@ -239,8 +239,8 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
   background: var(--surface);
   overflow: hidden;
 }
-.code-block pre { margin: 0; padding: 13px 15px; overflow-x: auto; }
-.code-block code { background: none; padding: 0; font-size: 0.82em; line-height: 1.6; }
+.code-block pre { margin: 0; padding: 13px 15px; overflow-x: auto; line-height: 1.5; }
+.code-block code { background: none; padding: 0; font-size: 0.82em; }
 .code-lang {
   position: absolute; top: 8px; right: 10px;
   font-family: var(--mono); font-size: 0.6rem;
@@ -282,9 +282,8 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
   gap: 6px;
   padding: 2px 0;
   font-family: var(--mono);
-  font-size: 0.68rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.01em; /* Hangul does not take tracking the way Latin does */
   color: var(--ink-3);
   transition: color 0.25s var(--ease);
 }
@@ -492,8 +491,8 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 
 .panel-title {
   font-family: var(--mono);
-  font-size: 0.64rem;
-  letter-spacing: 0.16em;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--ink-3);
 }

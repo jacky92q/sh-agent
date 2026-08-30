@@ -222,7 +222,10 @@ function addModelTurn() {
       if (think.hidden) return;
       think.classList.remove('open');
       toggle.setAttribute('aria-expanded', 'false');
-      label.textContent = seconds ? `생각 과정 · ${seconds}초` : '생각 과정';
+      // The stream seals once with a duration; the finally block seals again as
+      // a safety net and must not wipe the duration already on screen.
+      if (seconds) label.textContent = `생각 과정 · ${seconds}초`;
+      else if (label.textContent === '생각하는 중') label.textContent = '생각 과정';
     },
   };
 }
@@ -460,12 +463,17 @@ function setBusy(busy) {
 const input = $('input');
 
 function autoGrow() {
-  input.style.height = 'auto';
-  input.style.height = `${input.scrollHeight}px`;
+  // Collapsing to 0 first makes scrollHeight the true content height; 'auto'
+  // lets the UA fall back to the rows attribute and occasionally overshoots.
+  input.style.height = '0px';
+  const cap = Math.round(window.innerHeight * 0.42);
+  input.style.height = `${Math.max(28, Math.min(input.scrollHeight, cap))}px`;
   $('send').classList.toggle('ready', input.value.trim().length > 0 && !state.stream);
 }
 
 input.addEventListener('input', autoGrow);
+window.addEventListener('resize', autoGrow);
+window.addEventListener('load', autoGrow);
 
 input.addEventListener('keydown', (e) => {
   // Korean IME: a keydown during composition must never submit.
@@ -490,23 +498,36 @@ $('composer').addEventListener('submit', (e) => {
 
 const scrim = $('scrim');
 
-function openPanel(el) {
-  scrim.hidden = false;
+// `hidden` has to outlive the slide-out transition, so each element carries a
+// pending timer. Reopening cancels it — otherwise a stale close from 400ms ago
+// hides the panel that was just opened.
+const hideTimers = new WeakMap();
+
+function reveal(el) {
+  clearTimeout(hideTimers.get(el));
   el.hidden = false;
-  requestAnimationFrame(() => {
-    scrim.classList.add('open');
-    el.classList.add('open');
-  });
+  void el.offsetWidth; // flush layout so the transition starts from the closed state
+  el.classList.add('open');
+}
+
+function conceal(el, after) {
+  el.classList.remove('open');
+  clearTimeout(hideTimers.get(el));
+  hideTimers.set(el, setTimeout(() => { el.hidden = true; }, after));
+}
+
+function openPanel(el) {
+  for (const other of [$('drawer'), $('sheet')]) {
+    if (other !== el && !other.hidden) conceal(other, 460);
+  }
+  reveal(scrim);
+  reveal(el);
 }
 
 function closePanels() {
-  for (const el of [$('drawer'), $('sheet')]) {
-    if (el.hidden) continue;
-    el.classList.remove('open');
-    setTimeout(() => { el.hidden = true; }, 460);
-  }
-  scrim.classList.remove('open');
-  setTimeout(() => { scrim.hidden = true; }, 360);
+  conceal($('drawer'), 460);
+  conceal($('sheet'), 460);
+  conceal(scrim, 360);
 }
 
 function openSheet() {
@@ -649,7 +670,8 @@ function toast(text) {
   const el = $('toast');
   el.textContent = text;
   el.hidden = false;
-  requestAnimationFrame(() => el.classList.add('open'));
+  void el.offsetWidth;
+  el.classList.add('open');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
     el.classList.remove('open');
