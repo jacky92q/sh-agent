@@ -16,20 +16,95 @@ param(
     [int]$LmsPort = 1234,
     [string]$PagesUrl = 'https://jacky92q.github.io/sh-agent/',
     [switch]$NoTunnel,      # LAN only: skip cloudflared, print the local address
-    [switch]$NewKey         # rotate the access key
+    [switch]$NewKey,        # rotate the access key
+    [switch]$Restart        # stop a session that is already running and start fresh
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $stateDir = Join-Path $root '.sh-agent'
 $keyFile = Join-Path $stateDir 'access.key'
-$tunnelLog = Join-Path $stateDir 'tunnel.log'
+# Per-run name: a tunnel from an earlier run keeps its own log file open, and
+# Windows will not let us delete or reuse it while that process lives.
+$tunnelLog = Join-Path $stateDir "tunnel-$PID.log"
+$sessionFile = Join-Path $stateDir 'session.json'
 $procs = @()
 
 function Say($text, $color = 'Gray') { Write-Host $text -ForegroundColor $color }
 function Step($text) { Write-Host ''; Write-Host "  $text" -ForegroundColor White }
 
 if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Path $stateDir | Out-Null }
+
+function Test-RelayUp($port) {
+    try {
+        Invoke-RestMethod -Uri "http://127.0.0.1:$port/health" -TimeoutSec 3 | Out-Null
+        return $true
+    } catch { return $false }
+}
+
+function Write-PairingLink($url, $key) {
+    $payload = "{""e"":""$url"",""t"":""$key""}"
+    $blob = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    $link = "$($PagesUrl.TrimEnd('/'))/#c=$blob"
+    Write-Host ''
+    Write-Host '  ─────────────────────────────────────────────' -ForegroundColor DarkGray
+    Write-Host '   폰에서 이 링크를 한 번만 열면 연결됩니다' -ForegroundColor White
+    Write-Host ''
+    Write-Host "   $link" -ForegroundColor Cyan
+    Write-Host ''
+    Write-Host "   서버 주소   $url" -ForegroundColor DarkGray
+    Write-Host "   액세스 키   $key" -ForegroundColor DarkGray
+    Write-Host '  ─────────────────────────────────────────────' -ForegroundColor DarkGray
+    Write-Host ''
+    try { Set-Clipboard -Value $link } catch { }
+    return $link
+}
+
+# ------------------------------------------------------- already running?
+# Starting twice used to fail deep in the script with EADDRINUSE, after the
+# health probe had been fooled by the *previous* relay answering on the port.
+if (Test-RelayUp $RelayPort) {
+    $prev = $null
+    if (Test-Path $sessionFile) {
+        try { $prev = Get-Content $sessionFile -Raw | ConvertFrom-Json } catch { $prev = $null }
+    }
+
+    if ($Restart) {
+        Say "  실행 중인 세션을 종료합니다..." 'Yellow'
+        if ($prev) {
+            foreach ($id in @($prev.relayPid, $prev.tunnelPid)) {
+                if ($id) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+            }
+        } else {
+            # No session file (an older run, or one killed uncleanly). Stop
+            # exactly whoever holds the port rather than guessing by name.
+            $owner = Get-NetTCPConnection -LocalPort $RelayPort -State Listen -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty OwningProcess -Unique
+            foreach ($id in $owner) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+            $strays = @(Get-Process cloudflared -ErrorAction SilentlyContinue)
+            if ($strays.Count) {
+                Say "  cloudflared $($strays.Count)개가 남아있습니다. 이전 실행의 터널이면 종료하세요:" 'Yellow'
+                Say "    Stop-Process -Name cloudflared -Force" 'DarkGray'
+            }
+        }
+        Remove-Item $sessionFile -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 900
+        if (Test-RelayUp $RelayPort) {
+            Say "  :$RelayPort 를 아직 누군가 쓰고 있습니다. 해당 프로세스를 직접 종료해 주세요." 'Red'
+            exit 1
+        }
+    } elseif ($prev -and $prev.url) {
+        Say '  이미 실행 중입니다. 기존 주소를 그대로 씁니다.' 'Green'
+        Write-PairingLink $prev.url $prev.token | Out-Null
+        Say '  링크를 클립보드에 복사했습니다.'
+        Say '  다시 띄우려면  -Restart  옵션을 붙여 실행하세요.' 'DarkGray'
+        exit 0
+    } else {
+        Say "  :$RelayPort 가 이미 사용 중입니다 (이 스크립트가 띄운 게 아닙니다)." 'Red'
+        Say '  해당 프로세스를 종료하거나 -RelayPort 로 다른 포트를 쓰세요.' 'Red'
+        exit 1
+    }
+}
 
 # --------------------------------------------------------------- access key
 if ($NewKey -and (Test-Path $keyFile)) { Remove-Item $keyFile -Force }
@@ -100,6 +175,7 @@ try {
 
 # ------------------------------------------------------------------ tunnel
 $publicUrl = "http://localhost:$RelayPort"
+$tunnel = $null
 
 if (-not $NoTunnel) {
     Step 'Tunnel'
@@ -120,7 +196,9 @@ if (-not $NoTunnel) {
         exit 1
     }
 
-    if (Test-Path $tunnelLog) { Remove-Item $tunnelLog -Force }
+    # Best effort: a log still held open by an earlier tunnel is not our problem.
+    Get-ChildItem (Join-Path $stateDir 'tunnel-*.log*') -ErrorAction SilentlyContinue |
+        ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { } }
     $tunnel = Start-Process -FilePath $cfPath `
         -ArgumentList @('tunnel', '--no-autoupdate', '--url', "http://localhost:$RelayPort") `
         -NoNewWindow -PassThru -RedirectStandardError $tunnelLog -RedirectStandardOutput "$tunnelLog.out"
@@ -152,21 +230,20 @@ if ($NoTunnel) {
 }
 
 # ----------------------------------------------------------------- pairing
-$payload = "{""e"":""$publicUrl"",""t"":""$token""}"
-$pair = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-$link = "$($PagesUrl.TrimEnd('/'))/#c=$pair"
+Write-PairingLink $publicUrl $token | Out-Null
+Say '  링크를 클립보드에 복사했습니다. Ctrl+C 로 종료.'
 
-Write-Host ''
-Write-Host '  ─────────────────────────────────────────────' -ForegroundColor DarkGray
-Write-Host '   폰에서 이 링크를 한 번만 열면 연결됩니다' -ForegroundColor White
-Write-Host ''
-Write-Host "   $link" -ForegroundColor Cyan
-Write-Host ''
-Write-Host "   서버 주소   $publicUrl" -ForegroundColor DarkGray
-Write-Host "   액세스 키   $token" -ForegroundColor DarkGray
-Write-Host '  ─────────────────────────────────────────────' -ForegroundColor DarkGray
-Write-Host ''
-try { Set-Clipboard -Value $link; Say '  링크를 클립보드에 복사했습니다. Ctrl+C 로 종료.' } catch { Say '  Ctrl+C 로 종료.' }
+# Lets a second run recognise this session instead of colliding with it.
+$session = [ordered]@{
+    url       = $publicUrl
+    token     = $token
+    port      = $RelayPort
+    relayPid  = $relay.Id
+    tunnelPid = $null
+    startedAt = (Get-Date).ToString('s')
+}
+if ($tunnel) { $session.tunnelPid = $tunnel.Id }
+$session | ConvertTo-Json | Set-Content -Path $sessionFile -Encoding utf8
 
 if ($NoTunnel) {
     Say '  주의: GitHub Pages(HTTPS)에서는 http:// 주소를 호출할 수 없습니다.' 'Yellow'
@@ -187,4 +264,6 @@ try {
     foreach ($p in $procs) {
         if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
     }
+    Remove-Item $sessionFile -Force -ErrorAction SilentlyContinue
+    Remove-Item "$tunnelLog*" -Force -ErrorAction SilentlyContinue
 }

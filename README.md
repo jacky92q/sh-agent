@@ -39,11 +39,15 @@ powershell -ExecutionPolicy Bypass -File scripts\start.ps1
 
 | 플래그 | 설명 |
 | --- | --- |
+| `-Restart` | 이미 실행 중인 세션을 종료하고 새로 띄움 (터널 주소가 바뀝니다) |
 | `-NewKey` | 액세스 키 재발급 (기존 기기는 다시 페어링 필요) |
 | `-NoTunnel` | 터널 없이 LAN 주소만 사용 (같은 Wi-Fi + 로컬로 연 UI 전용) |
 | `-RelayPort` / `-LmsPort` | 포트 변경 |
 
 `Ctrl+C`로 릴레이와 터널이 함께 종료됩니다.
+
+이미 떠 있는 상태에서 그냥 다시 실행하면 새로 띄우지 않고 **기존 페어링 링크를 다시 출력**합니다.
+링크를 잃어버렸을 때 쓰면 됩니다. 실행 중인 세션 정보는 `.sh-agent/session.json`에 있습니다.
 
 ## 폰에서 (처음 한 번)
 
