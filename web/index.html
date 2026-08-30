@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0a0a0b" media="(prefers-color-scheme: dark)" />
+<meta name="theme-color" content="#f6f5f3" media="(prefers-color-scheme: light)" />
+<meta name="description" content="Private chat interface for a local model." />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<title>sh-agent</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0a0b'/><circle cx='16' cy='16' r='5' fill='%23c96f4a'/></svg>" />
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+
+<header class="topbar" id="topbar">
+  <button class="icon-btn" id="menuBtn" aria-label="대화 목록">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+  </button>
+
+  <div class="identity">
+    <span class="wordmark">sh<span class="dot-sep">·</span>agent</span>
+    <span class="subline" id="modelLabel">연결 대기</span>
+  </div>
+
+  <div class="topbar-actions">
+    <button class="status" id="statusBtn" aria-label="연결 상태">
+      <span class="status-led" data-state="idle" id="statusLed"></span>
+    </button>
+    <button class="icon-btn" id="settingsBtn" aria-label="설정">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.4M12 18.8v2.4M4.5 7.5l2 1.2M17.5 15.3l2 1.2M4.5 16.5l2-1.2M17.5 8.7l2-1.2"/></svg>
+    </button>
+  </div>
+</header>
+
+<main class="stage" id="stage">
+  <div class="thread" id="thread" role="log" aria-live="polite"></div>
+
+  <section class="overture" id="overture">
+    <div class="overture-mark" aria-hidden="true">
+      <span class="ring"></span><span class="core"></span>
+    </div>
+    <h1>로컬에서 도는 모델과<br />조용히 대화하기</h1>
+    <p class="overture-sub">이 화면은 당신의 PC에 있는 모델에 직접 연결됩니다. 대화는 어디에도 남지 않습니다.</p>
+    <div class="seeds" id="seeds"></div>
+  </section>
+</main>
+
+<footer class="composer-wrap">
+  <form class="composer" id="composer">
+    <textarea id="input" rows="1" placeholder="무엇이든 물어보세요" autocomplete="off" spellcheck="false" enterkeyhint="send"></textarea>
+    <button type="submit" class="send" id="send" aria-label="보내기">
+      <svg class="ic-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M12 5l-6 6M12 5l6 6"/></svg>
+      <span class="ic-stop" aria-hidden="true"></span>
+    </button>
+  </form>
+  <p class="hint" id="hint">Enter 전송 · Shift+Enter 줄바꿈</p>
+</footer>
+
+<div class="scrim" id="scrim" hidden></div>
+
+<aside class="drawer" id="drawer" hidden aria-label="대화 목록">
+  <div class="drawer-head">
+    <span class="panel-title">대화</span>
+    <button class="ghost-btn" id="newChatBtn">새 대화</button>
+  </div>
+  <div class="history" id="history"></div>
+</aside>
+
+<section class="sheet" id="sheet" hidden aria-label="설정">
+  <div class="grabber" aria-hidden="true"></div>
+  <div class="sheet-head">
+    <span class="panel-title">연결</span>
+    <button class="ghost-btn" id="sheetClose">닫기</button>
+  </div>
+
+  <div class="sheet-body">
+    <label class="field">
+      <span class="field-label">서버 주소</span>
+      <input id="fEndpoint" type="url" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="https://xxx.trycloudflare.com" />
+      <span class="field-note">PC에서 <code>start.ps1</code> 실행 시 출력되는 터널 주소</span>
+    </label>
+
+    <label class="field">
+      <span class="field-label">액세스 키</span>
+      <input id="fToken" type="password" autocapitalize="off" autocorrect="off" placeholder="릴레이가 발급한 키" />
+    </label>
+
+    <div class="probe">
+      <button class="ghost-btn wide" id="testBtn">연결 확인</button>
+      <span class="probe-msg" id="probeMsg"></span>
+    </div>
+
+    <hr class="rule" />
+    <span class="panel-title">모델</span>
+
+    <label class="field">
+      <span class="field-label">사용할 모델</span>
+      <div class="select-wrap">
+        <select id="fModel"><option value="">연결 후 자동으로 채워집니다</option></select>
+        <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+      </div>
+    </label>
+
+    <label class="field">
+      <span class="field-label">시스템 프롬프트</span>
+      <textarea id="fSystem" rows="3" placeholder="말투나 역할을 정해두세요"></textarea>
+    </label>
+
+    <label class="field">
+      <span class="field-label">온도 <b id="tempVal">0.7</b></span>
+      <input id="fTemp" type="range" min="0" max="1.4" step="0.1" value="0.7" />
+    </label>
+  </div>
+</section>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="./app.js" type="module"></script>
+</body>
+</html>
