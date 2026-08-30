@@ -17,7 +17,10 @@ const state = {
   stream: null,
   stickToBottom: true,
   pairingFailed: false,
+  pendingImages: [], // [{ id, dataUrl }] — attached, not yet sent
 };
+
+const MAX_IMAGES = 4;
 
 /* ------------------------------------------------------------- persistence */
 
@@ -73,7 +76,27 @@ function loadChats() {
   }
 }
 
-const saveChats = () => localStorage.setItem(CHATS_KEY, JSON.stringify(state.chats.slice(0, 40)));
+/**
+ * Attached images live in the stored chat as data URLs, so history fills the
+ * quota far faster than plain text ever did. On overflow, drop the oldest
+ * chats — newest first is what anyone actually wants kept — until it fits.
+ */
+function saveChats() {
+  state.chats = state.chats.slice(0, 40);
+  for (;;) {
+    try {
+      localStorage.setItem(CHATS_KEY, JSON.stringify(state.chats));
+      return;
+    } catch {
+      if (state.chats.length <= 1) {
+        localStorage.removeItem(CHATS_KEY);
+        toast('저장 공간이 부족해 오래된 대화를 정리했습니다');
+        return;
+      }
+      state.chats.pop();
+    }
+  }
+}
 
 const activeChat = () => state.chats.find((c) => c.id === state.activeId);
 
@@ -86,6 +109,90 @@ function ensureChat() {
   }
   return chat;
 }
+
+/* ------------------------------------------------------------------ images */
+
+/**
+ * Downscales to a JPEG data URL before it ever touches localStorage or the
+ * wire. The model gains nothing from a 12MP photo, and at full size a couple
+ * of attachments would blow both the relay's body limit and the phone's
+ * storage quota.
+ */
+function resizeImage(file, maxDim = 1152, quality = 0.82) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const w = Math.max(1, Math.round(img.width * scale));
+      const h = Math.max(1, Math.round(img.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('이미지를 읽을 수 없습니다'));
+    };
+    img.src = url;
+  });
+}
+
+function renderAttachStrip() {
+  const strip = $('attachStrip');
+  strip.replaceChildren();
+  strip.hidden = state.pendingImages.length === 0;
+  for (const img of state.pendingImages) {
+    const chip = document.createElement('div');
+    chip.className = 'attach-chip';
+    chip.innerHTML =
+      `<img src="${img.dataUrl}" alt="" />` +
+      '<button class="kill" type="button" aria-label="제거"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>';
+    chip.querySelector('.kill').addEventListener('click', () => {
+      state.pendingImages = state.pendingImages.filter((i) => i.id !== img.id);
+      renderAttachStrip();
+      updateSendReady();
+    });
+    strip.append(chip);
+  }
+}
+
+async function addFiles(fileList) {
+  const files = Array.from(fileList).filter((f) => f.type.startsWith('image/'));
+  if (!files.length) return;
+  const room = MAX_IMAGES - state.pendingImages.length;
+  if (room <= 0) {
+    toast(`이미지는 최대 ${MAX_IMAGES}장까지 첨부할 수 있습니다`);
+    return;
+  }
+  for (const file of files.slice(0, room)) {
+    try {
+      const dataUrl = await resizeImage(file);
+      state.pendingImages.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, dataUrl });
+    } catch {
+      toast(`${file.name} 을(를) 첨부하지 못했습니다`);
+    }
+  }
+  if (files.length > room) toast(`이미지는 최대 ${MAX_IMAGES}장까지 첨부할 수 있습니다`);
+  renderAttachStrip();
+  updateSendReady();
+}
+
+$('attachBtn').addEventListener('click', () => $('fileInput').click());
+$('fileInput').addEventListener('change', () => {
+  addFiles($('fileInput').files);
+  $('fileInput').value = '';
+});
+
+const lightbox = $('lightbox');
+function openLightbox(src) {
+  $('lightboxImg').src = src;
+  reveal(lightbox);
+}
+lightbox.addEventListener('click', () => conceal(lightbox, 280));
 
 /* ---------------------------------------------------------------- markdown */
 
@@ -185,12 +292,45 @@ stage.addEventListener('scroll', () => {
   state.stickToBottom = stage.scrollHeight - stage.scrollTop - stage.clientHeight < 130;
 });
 
-function addUserTurn(text) {
+function addUserTurn(text, images = []) {
   const el = document.createElement('div');
   el.className = 'turn user';
-  el.textContent = text;
+  if (images.length) {
+    const grid = document.createElement('div');
+    grid.className = 'user-images';
+    for (const src of images) {
+      const img = document.createElement('img');
+      img.src = src;
+      img.alt = '첨부 이미지';
+      img.loading = 'lazy';
+      grid.append(img);
+    }
+    el.append(grid);
+  }
+  if (text) {
+    const p = document.createElement('div');
+    p.className = 'user-text';
+    p.textContent = text;
+    el.append(p);
+  }
   thread.appendChild(el);
   return el;
+}
+
+/** A stored message's content is either a plain string or an OpenAI-style
+ * content-part array (when it carries images). Both directions go through
+ * this pair so storage, rendering, and the outgoing request agree on shape. */
+function partsOf(content) {
+  if (typeof content === 'string') return { text: content, images: [] };
+  const text = content.filter((p) => p.type === 'text').map((p) => p.text).join('\n');
+  const images = content.filter((p) => p.type === 'image_url').map((p) => p.image_url.url);
+  return { text, images };
+}
+function toContent(text, images) {
+  if (!images.length) return text;
+  const parts = images.map((url) => ({ type: 'image_url', image_url: { url } }));
+  if (text) parts.push({ type: 'text', text });
+  return parts;
 }
 
 /**
@@ -270,7 +410,8 @@ function paintThread() {
   $('overture').hidden = msgs.length > 0;
   for (const m of msgs) {
     if (m.role === 'user') {
-      addUserTurn(m.content);
+      const { text, images } = partsOf(m.content);
+      addUserTurn(text, images);
     } else {
       const turn = addModelTurn();
       turn.el.classList.remove('live');
@@ -286,6 +427,9 @@ function paintThread() {
 }
 
 thread.addEventListener('click', async (e) => {
+  const img = e.target.closest('.user-images img');
+  if (img) { openLightbox(img.src); return; }
+
   const btn = e.target.closest('.copy');
   if (!btn) return;
   const code = btn.parentElement.querySelector('code');
@@ -342,22 +486,22 @@ function fillModels(models) {
 
 /* ------------------------------------------------------------------ stream */
 
-async function send(text) {
+async function send(text, images = []) {
   if (state.stream) return;
   const { endpoint, token } = state.cfg;
   if (!endpoint) { openSheet(); toast('서버 주소를 먼저 입력하세요'); return; }
 
   const chat = ensureChat();
   if (chat.messages.length === 0) {
-    chat.title = text.replace(/\s+/g, ' ').slice(0, 42) || '새 대화';
+    chat.title = text.replace(/\s+/g, ' ').slice(0, 42) || '이미지 메시지';
   }
-  chat.messages.push({ role: 'user', content: text });
+  chat.messages.push({ role: 'user', content: toContent(text, images) });
   chat.at = Date.now();
   saveChats();
   paintHistory();
 
   $('overture').hidden = true;
-  addUserTurn(text);
+  addUserTurn(text, images);
   scrollToEnd(true);
 
   const turn = addModelTurn();
@@ -491,13 +635,18 @@ function setBusy(busy) {
 
 const input = $('input');
 
+function updateSendReady() {
+  const hasContent = input.value.trim().length > 0 || state.pendingImages.length > 0;
+  $('send').classList.toggle('ready', hasContent && !state.stream);
+}
+
 function autoGrow() {
   // Collapsing to 0 first makes scrollHeight the true content height; 'auto'
   // lets the UA fall back to the rows attribute and occasionally overshoots.
   input.style.height = '0px';
   const cap = Math.round(window.innerHeight * 0.42);
   input.style.height = `${Math.max(28, Math.min(input.scrollHeight, cap))}px`;
-  $('send').classList.toggle('ready', input.value.trim().length > 0 && !state.stream);
+  updateSendReady();
 }
 
 input.addEventListener('input', autoGrow);
@@ -513,15 +662,94 @@ input.addEventListener('keydown', (e) => {
   }
 });
 
+// Pasting an image straight into the composer works too.
+input.addEventListener('paste', (e) => {
+  const files = Array.from(e.clipboardData?.files || []).filter((f) => f.type.startsWith('image/'));
+  if (files.length) addFiles(files);
+});
+
 $('composer').addEventListener('submit', (e) => {
   e.preventDefault();
   if (state.stream) { state.stream.abort(); return; }
   const text = input.value.trim();
-  if (!text) return;
+  const images = state.pendingImages.map((i) => i.dataUrl);
+  if (!text && !images.length) return;
   input.value = '';
+  state.pendingImages = [];
+  renderAttachStrip();
   autoGrow();
-  send(text);
+  send(text, images);
 });
+
+/* ------------------------------------------------------------------- mic */
+
+/**
+ * The model itself refuses audio input outright (`input_audio` gets a hard
+ * error from LM Studio) — Gemma takes text and images only. A microphone
+ * button that actually attached an audio file would just fail every time, so
+ * this transcribes speech to text in the browser instead and drops it into
+ * the composer, which is what "talk to it" means in practice.
+ */
+const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+if (SpeechRecognitionCtor) {
+  const micBtn = $('micBtn');
+  micBtn.hidden = false;
+
+  const recognizer = new SpeechRecognitionCtor();
+  recognizer.lang = 'ko-KR';
+  recognizer.continuous = true;
+  recognizer.interimResults = true;
+
+  let listening = false;
+  let baseText = '';
+
+  const stop = () => {
+    listening = false;
+    micBtn.classList.remove('recording');
+    try { recognizer.stop(); } catch {}
+  };
+
+  micBtn.addEventListener('click', () => {
+    if (listening) { stop(); return; }
+    baseText = input.value ? `${input.value.trim()} ` : '';
+    listening = true;
+    micBtn.classList.add('recording');
+    try {
+      recognizer.start();
+    } catch {
+      // start() throws if a recognition session is already active anywhere
+      // on the page; treat it the same as a failed start.
+      listening = false;
+      micBtn.classList.remove('recording');
+    }
+  });
+
+  recognizer.addEventListener('result', (e) => {
+    let transcript = '';
+    for (const result of e.results) transcript += result[0].transcript;
+    input.value = baseText + transcript;
+    autoGrow();
+  });
+
+  recognizer.addEventListener('end', () => {
+    // iOS Safari ends the session on its own after a pause; reflect that
+    // instead of leaving the button stuck in its recording state.
+    listening = false;
+    micBtn.classList.remove('recording');
+  });
+
+  recognizer.addEventListener('error', (e) => {
+    listening = false;
+    micBtn.classList.remove('recording');
+    if (e.error === 'no-speech' || e.error === 'aborted') return;
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      toast('마이크 권한이 필요합니다');
+    } else {
+      toast('음성 인식에 실패했습니다');
+    }
+  });
+}
 
 /* ----------------------------------------------------------------- panels */
 

@@ -22,7 +22,9 @@ const UPSTREAM = (process.env.LMS_URL || 'http://127.0.0.1:1234').replace(/\/+$/
 const KEYS_FILE = process.env.RELAY_KEYS_FILE || '';
 const FALLBACK_TOKEN = process.env.RELAY_TOKEN || randomBytes(16).toString('base64url');
 const MAX_KEYS = 2; // one model on one machine; a third seat only makes a queue
-const MAX_BODY = 8 * 1024 * 1024;
+// Every attached image rides along on every later turn too, since the whole
+// conversation is resent each request — a few image turns adds up fast.
+const MAX_BODY = 24 * 1024 * 1024;
 
 const CORS = {
   'access-control-allow-origin': '*',
