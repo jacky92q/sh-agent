@@ -17,10 +17,22 @@ const state = {
   stream: null,
   stickToBottom: true,
   pairingFailed: false,
-  pendingImages: [], // [{ id, dataUrl }] — attached, not yet sent
+  // Each entry is { id, kind: 'image', dataUrl } or { id, kind: 'doc', name, size, text, truncated }.
+  pendingAttachments: [],
 };
 
 const MAX_IMAGES = 4;
+const MAX_DOCS = 3;
+const DOC_CHAR_CAP = 4000; // ~1200 tokens; the loaded model's context window is small
+const MAX_DOC_BYTES = 3 * 1024 * 1024;
+
+// Extensions read as plain text. Anything else falls to MIME sniffing in docKind().
+const TEXT_EXTENSIONS = new Set([
+  'txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'yaml', 'yml', 'log',
+  'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx', 'py', 'java', 'c', 'h', 'cpp', 'hpp',
+  'go', 'rs', 'rb', 'php', 'html', 'htm', 'css', 'scss', 'sh', 'bash', 'ps1',
+  'sql', 'xml', 'ini', 'toml', 'conf', 'env',
+]);
 
 /* ------------------------------------------------------------- persistence */
 
@@ -110,7 +122,7 @@ function ensureChat() {
   return chat;
 }
 
-/* ------------------------------------------------------------------ images */
+/* ------------------------------------------------------------ attachments */
 
 /**
  * Downscales to a JPEG data URL before it ever touches localStorage or the
@@ -141,18 +153,78 @@ function resizeImage(file, maxDim = 1152, quality = 0.82) {
   });
 }
 
+/** 'pdf' | 'text' | null (unsupported) — decided by extension first, MIME as a fallback. */
+function docKind(file) {
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  if (ext === 'pdf' || file.type === 'application/pdf') return 'pdf';
+  if (TEXT_EXTENSIONS.has(ext) || file.type.startsWith('text/') || file.type === 'application/json') return 'text';
+  return null;
+}
+
+// pdf.js is only fetched the moment someone actually attaches a PDF — most
+// sessions never touch it, so it stays off the critical path entirely.
+const PDFJS_VERSION = '3.11.174';
+const PDFJS_BASE = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}`;
+let pdfjsReady = null;
+function loadPdfJs() {
+  if (pdfjsReady) return pdfjsReady;
+  pdfjsReady = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = `${PDFJS_BASE}/pdf.min.js`;
+    s.onload = () => {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS_BASE}/pdf.worker.min.js`;
+      resolve(window.pdfjsLib);
+    };
+    s.onerror = () => reject(new Error('PDF 라이브러리를 불러오지 못했습니다'));
+    document.head.append(s);
+  });
+  return pdfjsReady;
+}
+
+async function extractPdfText(file, capChars) {
+  const pdfjsLib = await loadPdfJs();
+  const doc = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+  let text = '';
+  for (let i = 1; i <= doc.numPages && text.length < capChars; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map((it) => it.str).join(' ') + '\n';
+  }
+  return text;
+}
+
+async function readDoc(file, kind) {
+  const raw = kind === 'pdf' ? await extractPdfText(file, DOC_CHAR_CAP + 1) : await file.text();
+  const truncated = raw.length > DOC_CHAR_CAP;
+  return { text: truncated ? raw.slice(0, DOC_CHAR_CAP) : raw, truncated };
+}
+
+const countPending = (kind) => state.pendingAttachments.filter((a) => a.kind === kind).length;
+const newId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+const DOC_ICON =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4M9 12h6M9 16h6"/></svg>';
+
 function renderAttachStrip() {
   const strip = $('attachStrip');
   strip.replaceChildren();
-  strip.hidden = state.pendingImages.length === 0;
-  for (const img of state.pendingImages) {
+  strip.hidden = state.pendingAttachments.length === 0;
+
+  for (const item of state.pendingAttachments) {
     const chip = document.createElement('div');
-    chip.className = 'attach-chip';
-    chip.innerHTML =
-      `<img src="${img.dataUrl}" alt="" />` +
-      '<button class="kill" type="button" aria-label="제거"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>';
+    const kill = '<button class="kill" type="button" aria-label="제거"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>';
+
+    if (item.kind === 'image') {
+      chip.className = 'attach-chip image';
+      chip.innerHTML = `<img src="${item.dataUrl}" alt="" />${kill}`;
+    } else {
+      chip.className = 'attach-chip doc';
+      chip.innerHTML = `${DOC_ICON}<span class="doc-name">${esc(item.name)}</span>${kill}`;
+      chip.title = `${item.name} · ${item.text.length.toLocaleString()}자${item.truncated ? ' (일부만 첨부됨)' : ''}`;
+    }
+
     chip.querySelector('.kill').addEventListener('click', () => {
-      state.pendingImages = state.pendingImages.filter((i) => i.id !== img.id);
+      state.pendingAttachments = state.pendingAttachments.filter((a) => a.id !== item.id);
       renderAttachStrip();
       updateSendReady();
     });
@@ -161,22 +233,42 @@ function renderAttachStrip() {
 }
 
 async function addFiles(fileList) {
-  const files = Array.from(fileList).filter((f) => f.type.startsWith('image/'));
+  const files = Array.from(fileList);
   if (!files.length) return;
-  const room = MAX_IMAGES - state.pendingImages.length;
-  if (room <= 0) {
-    toast(`이미지는 최대 ${MAX_IMAGES}장까지 첨부할 수 있습니다`);
-    return;
-  }
-  for (const file of files.slice(0, room)) {
+  let imageOverflow = false;
+  let docOverflow = false;
+
+  for (const file of files) {
+    if (file.type.startsWith('image/')) {
+      if (countPending('image') >= MAX_IMAGES) { imageOverflow = true; continue; }
+      try {
+        state.pendingAttachments.push({ id: newId(), kind: 'image', dataUrl: await resizeImage(file) });
+      } catch {
+        toast(`${file.name} 을(를) 첨부하지 못했습니다`);
+      }
+      continue;
+    }
+
+    const kind = docKind(file);
+    if (!kind) {
+      toast(`${file.name} 은(는) 지원하지 않는 형식입니다 (이미지 · 텍스트 · PDF만 가능)`);
+      continue;
+    }
+    if (countPending('doc') >= MAX_DOCS) { docOverflow = true; continue; }
+    if (file.size > MAX_DOC_BYTES) {
+      toast(`${file.name} 이(가) 너무 큽니다 (최대 3MB)`);
+      continue;
+    }
     try {
-      const dataUrl = await resizeImage(file);
-      state.pendingImages.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, dataUrl });
+      const { text, truncated } = await readDoc(file, kind);
+      state.pendingAttachments.push({ id: newId(), kind: 'doc', name: file.name, size: file.size, text, truncated });
     } catch {
-      toast(`${file.name} 을(를) 첨부하지 못했습니다`);
+      toast(`${file.name} 을(를) 읽지 못했습니다`);
     }
   }
-  if (files.length > room) toast(`이미지는 최대 ${MAX_IMAGES}장까지 첨부할 수 있습니다`);
+
+  if (imageOverflow) toast(`이미지는 최대 ${MAX_IMAGES}장까지 첨부할 수 있습니다`);
+  if (docOverflow) toast(`파일은 최대 ${MAX_DOCS}개까지 첨부할 수 있습니다`);
   renderAttachStrip();
   updateSendReady();
 }
@@ -292,9 +384,22 @@ stage.addEventListener('scroll', () => {
   state.stickToBottom = stage.scrollHeight - stage.scrollTop - stage.clientHeight < 130;
 });
 
-function addUserTurn(text, images = []) {
+function addUserTurn(text, images = [], docs = []) {
   const el = document.createElement('div');
   el.className = 'turn user';
+
+  if (docs.length) {
+    const row = document.createElement('div');
+    row.className = 'user-docs';
+    for (const doc of docs) {
+      const badge = document.createElement('span');
+      badge.className = 'doc-badge';
+      badge.title = `${doc.text.length.toLocaleString()}자${doc.truncated ? ' · 일부만 전달됨' : ''}`;
+      badge.innerHTML = `${DOC_ICON}<span class="doc-name">${esc(doc.name)}</span>`;
+      row.append(badge);
+    }
+    el.append(row);
+  }
   if (images.length) {
     const grid = document.createElement('div');
     grid.className = 'user-images';
@@ -317,19 +422,43 @@ function addUserTurn(text, images = []) {
   return el;
 }
 
-/** A stored message's content is either a plain string or an OpenAI-style
- * content-part array (when it carries images). Both directions go through
- * this pair so storage, rendering, and the outgoing request agree on shape. */
+/**
+ * A stored user message is a plain string (text only — the common case, and
+ * how every message looked before attachments existed) or an object carrying
+ * images/docs alongside the text. partsOf() also reads the older in-between
+ * shape (a raw OpenAI content-parts array) that a couple of chats saved
+ * during this feature's own development still have on disk.
+ */
 function partsOf(content) {
-  if (typeof content === 'string') return { text: content, images: [] };
-  const text = content.filter((p) => p.type === 'text').map((p) => p.text).join('\n');
-  const images = content.filter((p) => p.type === 'image_url').map((p) => p.image_url.url);
-  return { text, images };
+  if (typeof content === 'string') return { text: content, images: [], docs: [] };
+  if (Array.isArray(content)) {
+    const text = content.filter((p) => p.type === 'text').map((p) => p.text).join('\n');
+    const images = content.filter((p) => p.type === 'image_url').map((p) => p.image_url.url);
+    return { text, images, docs: [] };
+  }
+  return { text: content.text || '', images: content.images || [], docs: content.docs || [] };
 }
-function toContent(text, images) {
-  if (!images.length) return text;
+
+/** What actually gets saved to localStorage for a new user turn. */
+function toStored(text, images, docs) {
+  if (!images.length && !docs.length) return text;
+  return { text, images, docs };
+}
+
+/**
+ * What goes out over the wire. The API has no notion of an attached document,
+ * so each one is folded into the text as a clearly delimited block ahead of
+ * the user's own words — the model just reads it as more context.
+ */
+function toApiContent(content) {
+  const { text, images, docs } = partsOf(content);
+  const docText = docs
+    .map((d) => `--- 첨부 파일: ${d.name} ---\n${d.text}${d.truncated ? '\n[이하 생략]' : ''}\n--- 파일 끝 ---`)
+    .join('\n\n');
+  const combined = [docText, text].filter(Boolean).join('\n\n');
+  if (!images.length) return combined;
   const parts = images.map((url) => ({ type: 'image_url', image_url: { url } }));
-  if (text) parts.push({ type: 'text', text });
+  if (combined) parts.push({ type: 'text', text: combined });
   return parts;
 }
 
@@ -410,8 +539,8 @@ function paintThread() {
   $('overture').hidden = msgs.length > 0;
   for (const m of msgs) {
     if (m.role === 'user') {
-      const { text, images } = partsOf(m.content);
-      addUserTurn(text, images);
+      const { text, images, docs } = partsOf(m.content);
+      addUserTurn(text, images, docs);
     } else {
       const turn = addModelTurn();
       turn.el.classList.remove('live');
@@ -486,22 +615,22 @@ function fillModels(models) {
 
 /* ------------------------------------------------------------------ stream */
 
-async function send(text, images = []) {
+async function send(text, images = [], docs = []) {
   if (state.stream) return;
   const { endpoint, token } = state.cfg;
   if (!endpoint) { openSheet(); toast('서버 주소를 먼저 입력하세요'); return; }
 
   const chat = ensureChat();
   if (chat.messages.length === 0) {
-    chat.title = text.replace(/\s+/g, ' ').slice(0, 42) || '이미지 메시지';
+    chat.title = text.replace(/\s+/g, ' ').slice(0, 42) || docs[0]?.name || '이미지 메시지';
   }
-  chat.messages.push({ role: 'user', content: toContent(text, images) });
+  chat.messages.push({ role: 'user', content: toStored(text, images, docs) });
   chat.at = Date.now();
   saveChats();
   paintHistory();
 
   $('overture').hidden = true;
-  addUserTurn(text, images);
+  addUserTurn(text, images, docs);
   scrollToEnd(true);
 
   const turn = addModelTurn();
@@ -515,7 +644,12 @@ async function send(text, images = []) {
 
   const messages = [];
   if (state.cfg.system.trim()) messages.push({ role: 'system', content: state.cfg.system.trim() });
-  messages.push(...chat.messages.map((m) => ({ role: m.role, content: m.content })));
+  messages.push(
+    ...chat.messages.map((m) => ({
+      role: m.role,
+      content: m.role === 'user' ? toApiContent(m.content) : m.content,
+    }))
+  );
 
   let acc = '';
   let reasoning = '';
@@ -636,7 +770,7 @@ function setBusy(busy) {
 const input = $('input');
 
 function updateSendReady() {
-  const hasContent = input.value.trim().length > 0 || state.pendingImages.length > 0;
+  const hasContent = input.value.trim().length > 0 || state.pendingAttachments.length > 0;
   $('send').classList.toggle('ready', hasContent && !state.stream);
 }
 
@@ -664,7 +798,7 @@ input.addEventListener('keydown', (e) => {
 
 // Pasting an image straight into the composer works too.
 input.addEventListener('paste', (e) => {
-  const files = Array.from(e.clipboardData?.files || []).filter((f) => f.type.startsWith('image/'));
+  const files = Array.from(e.clipboardData?.files || []);
   if (files.length) addFiles(files);
 });
 
@@ -672,13 +806,14 @@ $('composer').addEventListener('submit', (e) => {
   e.preventDefault();
   if (state.stream) { state.stream.abort(); return; }
   const text = input.value.trim();
-  const images = state.pendingImages.map((i) => i.dataUrl);
-  if (!text && !images.length) return;
+  const images = state.pendingAttachments.filter((a) => a.kind === 'image').map((a) => a.dataUrl);
+  const docs = state.pendingAttachments.filter((a) => a.kind === 'doc');
+  if (!text && !images.length && !docs.length) return;
   input.value = '';
-  state.pendingImages = [];
+  state.pendingAttachments = [];
   renderAttachStrip();
   autoGrow();
-  send(text, images);
+  send(text, images, docs);
 });
 
 /* ------------------------------------------------------------------- mic */
@@ -1001,3 +1136,11 @@ health(true);
 setInterval(() => { if (!state.stream && !document.hidden) health(true); }, 45000);
 
 if (!state.cfg.endpoint) setTimeout(openSheet, 700);
+
+// The only thing this buys is Chrome's "설치" prompt — see sw.js for why it
+// is safe to have running underneath a page that also talks to a tunnel.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}

@@ -7,9 +7,13 @@
 <meta name="theme-color" content="#f6f5f3" media="(prefers-color-scheme: light)" />
 <meta name="description" content="Private chat interface for a local model." />
 <meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="sh-agent" />
 <meta name="mobile-web-app-capable" content="yes" />
 <title>sh-agent</title>
+<link rel="manifest" href="./manifest.json" />
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0a0b'/><circle cx='16' cy='16' r='5' fill='%23c96f4a'/></svg>" />
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
 <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
@@ -51,9 +55,9 @@
   <div class="attach-strip" id="attachStrip" hidden></div>
 
   <form class="composer" id="composer">
-    <input type="file" id="fileInput" accept="image/*" multiple hidden />
-    <button type="button" class="pill-btn" id="attachBtn" aria-label="이미지 첨부">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 12l3-3 2 2 3-3 4 4V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h6"/><circle cx="8.5" cy="8.5" r="1.3"/><path d="M17 15v6M14 18h6"/></svg>
+    <input type="file" id="fileInput" accept="image/*,.pdf,.txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.log,.js,.mjs,.cjs,.ts,.jsx,.tsx,.py,.java,.c,.h,.cpp,.hpp,.go,.rs,.rb,.php,.html,.htm,.css,.scss,.sh,.bash,.ps1,.sql,.xml,.ini,.toml,.conf,.env" multiple hidden />
+    <button type="button" class="pill-btn" id="attachBtn" aria-label="파일 첨부">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 7.5l-7.1 7.1a2.5 2.5 0 0 0 3.54 3.54l7.1-7.1a4.5 4.5 0 1 0-6.36-6.36L6.5 11.86a6.5 6.5 0 1 0 9.19 9.19"/></svg>
     </button>
 
     <textarea id="input" rows="1" placeholder="무엇이든 물어보세요" autocomplete="off" spellcheck="false" enterkeyhint="send"></textarea>

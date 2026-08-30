@@ -26,11 +26,17 @@ jobs:
         run: |
           node --check server/relay.mjs
           node --check web/app.js
+          node --check web/sw.js
+          python3 -c "import json; json.load(open('web/manifest.json', encoding='utf-8'))"
       - name: Every asset the page references exists
         run: |
-          for f in styles.css app.js; do
+          for f in styles.css app.js manifest.json icons/apple-touch-icon.png; do
             grep -q "$f" web/index.html || { echo "index.html no longer references $f"; exit 1; }
             test -f "web/$f" || { echo "missing web/$f"; exit 1; }
+          done
+          for f in icon-192.png icon-512.png icon-512-maskable.png; do
+            grep -q "$f" web/manifest.json || { echo "manifest.json no longer references $f"; exit 1; }
+            test -f "web/icons/$f" || { echo "missing web/icons/$f"; exit 1; }
           done
 
   deploy:
