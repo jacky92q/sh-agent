@@ -1,89 +1,135 @@
 # sh-agent
 
-집 PC의 LM Studio에서 도는 모델(`google/gemma-4-e2b`)을 폰에서 쓰기 위한 웹 UI + 로컬 릴레이.
+집 PC의 LM Studio에서 도는 모델을 폰에서 쓰는 웹 UI.
 
-**UI** → https://jacky92q.github.io/sh-agent/
+**주소** → https://jacky92q.github.io/sh-agent/
 
-```
-폰 브라우저                     PC
-─────────────                 ──────────────────────────────────
-GitHub Pages (정적 UI)  ──▶  Cloudflare 터널 (https)
-                              └▶ 릴레이 :8787  (토큰 검증 · CORS)
-                                  └▶ LM Studio :1234  (모델)
-```
+대화 내용은 각자 폰에만 저장되고, 요청은 전부 이 PC로만 갑니다.
 
-대화 내용은 폰의 `localStorage`에만 남고, 요청은 전부 이 PC로만 갑니다.
+---
 
-## PC에서 (서버 켜기)
+## 처음 시작하기
 
-한 번만:
+### 1. PC 준비 (한 번만)
+
+LM Studio에서 모델을 받아두고(예: `google/gemma-4-e2b`), 터널 도구를 설치합니다.
 
 ```powershell
 winget install --id Cloudflare.cloudflared
 ```
 
-매번:
+설치 후 터미널을 새로 여세요.
+
+### 2. 서버 켜기
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\start.ps1
 ```
 
-스크립트가 하는 일:
+LM Studio 서버 → 릴레이 → 터널이 차례로 뜨고, **페어링 링크**가 출력되면서 클립보드에 복사됩니다.
 
-1. LM Studio 서버를 `:1234`에 올림 (`lms server start`)
-2. 릴레이를 `:8787`에 올림
-3. Cloudflare 임시 터널을 열어 `https://...trycloudflare.com` 주소를 받음
-4. **페어링 링크**를 출력하고 클립보드에 복사
+### 3. 폰에서 링크 열기
 
-옵션:
+복사된 링크를 폰으로 보내서 한 번 열면 끝입니다. 주소와 키가 저장되고 바로 대화할 수 있습니다.
+
+> 링크가 안 먹으면 링크 **전체를** 설정(⚙) → `서버 주소` 칸에 그대로 붙여넣으세요. 알아서 주소와 키를 분리합니다.
+
+---
+
+## 매일 쓰기
+
+1. PC에서 `start.ps1` 실행
+2. 출력된 링크를 폰에서 열기
+3. 끝나면 터미널에서 `Ctrl+C`
+
+**터널 주소는 실행할 때마다 바뀝니다.** 그래서 PC를 껐다 켜면 링크를 다시 열어야 합니다.
+고정 주소가 필요하면 Cloudflare 계정을 붙여 named tunnel로 바꾸면 됩니다.
+
+이미 켜져 있는데 또 실행하면 새로 띄우지 않고 **기존 링크를 다시 출력**합니다. 링크를 잃어버렸을 때 쓰세요.
+
+---
+
+## 다른 사람에게 열어주기 (최대 2명)
+
+좌석은 **2개까지만** 발급됩니다. PC 한 대에 모델 하나라, 세 명째는 줄을 서는 것과 같습니다.
+
+```powershell
+# 게스트 좌석 발급 → 그 사람에게 보낼 링크가 출력됩니다
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -AddGuest 민수
+
+# 현재 좌석 확인
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -Seats
+
+# 좌석 회수 (서버 재시작 없이 즉시 차단)
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -Revoke 민수
+```
+
+발급과 회수 모두 **서버를 켜둔 채로** 됩니다. 릴레이가 키 파일 변경을 즉시 반영하기 때문에,
+한 사람을 끊어도 나머지 한 명의 링크는 그대로 살아 있습니다.
+
+좌석이 찬 상태에서 `-AddGuest`를 하면 거부되고 현재 좌석을 보여줍니다.
+
+### 알아두실 것
+
+- 링크를 받은 사람은 이 PC의 **모델에 완전한 접근권**을 갖습니다. 그 사람이 링크를 또 넘겨도 알 방법은 없습니다.
+- 다만 릴레이는 `/v1/models`와 `/v1/chat/completions`만 통과시킵니다. 키가 있어도 PC의 다른 것에는 손댈 수 없습니다.
+- 둘이 동시에 쓰면 느려집니다. 측정값: 혼자 16초 → 동시 2건 25초.
+- 릴레이 로그에 누가 요청했는지 이름으로 찍힙니다.
+
+---
+
+## 옵션
 
 | 플래그 | 설명 |
 | --- | --- |
-| `-Restart` | 이미 실행 중인 세션을 종료하고 새로 띄움 (터널 주소가 바뀝니다) |
-| `-NewKey` | 액세스 키 재발급 (기존 기기는 다시 페어링 필요) |
-| `-NoTunnel` | 터널 없이 LAN 주소만 사용 (같은 Wi-Fi + 로컬로 연 UI 전용) |
+| `-AddGuest <이름>` | 두 번째 좌석 발급, 링크 출력 |
+| `-Revoke <이름>` | 좌석 회수 (즉시 적용) |
+| `-Seats` | 현재 좌석 목록 |
+| `-Restart` | 실행 중인 세션을 끄고 새로 띄움 (주소가 바뀝니다) |
+| `-NewKey` | 모든 키 폐기 (두 사람 모두 재페어링) |
+| `-NoTunnel` | 터널 없이 LAN 주소만 (PC에서 로컬로 열 때만) |
 | `-RelayPort` / `-LmsPort` | 포트 변경 |
 
-`Ctrl+C`로 릴레이와 터널이 함께 종료됩니다.
+---
 
-이미 떠 있는 상태에서 그냥 다시 실행하면 새로 띄우지 않고 **기존 페어링 링크를 다시 출력**합니다.
-링크를 잃어버렸을 때 쓰면 됩니다. 실행 중인 세션 정보는 `.sh-agent/session.json`에 있습니다.
+## 잘 안 될 때
 
-## 폰에서 (처음 한 번)
+| 증상 | 원인과 조치 |
+| --- | --- |
+| 폰에서 설정 팝업이 뜬다 | 링크가 잘렸습니다. 링크 전체를 `서버 주소` 칸에 붙여넣으세요 |
+| 빨간 불 · "연결 실패" | PC의 `start.ps1`이 꺼졌거나 주소가 바뀌었습니다. 새 링크를 여세요 |
+| 빨간 불 · "LM STUDIO 꺼짐" | 릴레이는 살아있지만 모델 서버가 꺼졌습니다 |
+| 고친 게 폰에 반영이 안 된다 | 배포 후 최대 10분간 HTML이 캐시됩니다. 새로고침하세요 |
+| `EADDRINUSE` | 이미 실행 중입니다. `-Restart`를 붙이세요 |
 
-출력된 페어링 링크를 폰에서 열면 끝입니다. 링크의 `#c=...` 조각에 서버 주소와 키가 들어있고,
-프래그먼트는 서버로 전송되지 않습니다. 값은 브라우저에 저장된 뒤 주소창에서 지워집니다.
-
-수동으로 넣으려면 우측 상단 톱니 → **서버 주소**와 **액세스 키**에 콘솔 출력값을 입력하세요.
-
-> 터널 주소는 실행할 때마다 바뀝니다. PC를 껐다 켜면 새 링크를 다시 열어야 합니다.
-> 고정 주소가 필요하면 Cloudflare 계정을 붙여 named tunnel로 바꾸면 됩니다.
+---
 
 ## 구조
+
+```
+폰 브라우저 → GitHub Pages(정적 UI) → Cloudflare 터널 → 릴레이 :8787 → LM Studio :1234
+```
+
+GitHub Pages는 HTTPS라 `http://집IP:1234`를 직접 부르면 브라우저가 차단합니다. 터널이 필요한 이유입니다.
 
 | 경로 | 역할 |
 | --- | --- |
 | `web/` | 빌드 없는 정적 UI. Pages로 배포되는 유일한 디렉터리 |
-| `server/relay.mjs` | 의존성 없는 Node 릴레이. 토큰 게이트 · CORS · SSE 패스스루 |
-| `scripts/start.ps1` | LM Studio + 릴레이 + 터널 기동, 페어링 링크 출력 |
-| `.github/workflows/deploy.yml` | `main` 푸시 → 문법 검사 → Pages 배포 |
+| `server/relay.mjs` | 의존성 없는 Node 릴레이. 좌석 검증 · CORS · SSE 패스스루 |
+| `scripts/start.ps1` | 서버 기동, 좌석 관리, 페어링 링크 |
+| `.github/workflows/deploy.yml` | `main` 푸시 → 검사 → Pages 배포 |
 
-## 릴레이 API
+상태 파일은 `.sh-agent/`에 있고 git에는 올라가지 않습니다.
+
+| 파일 | 내용 |
+| --- | --- |
+| `keys.json` | 좌석 목록 (이름 + 키) |
+| `session.json` | 실행 중인 세션의 주소와 PID |
+
+### 릴레이 API
 
 | 엔드포인트 | 인증 | 설명 |
 | --- | --- | --- |
-| `GET /health` | 없음 | 릴레이/업스트림 상태, 모델 목록 |
+| `GET /health` | 없음 | 릴레이/모델 상태, 좌석 수 |
 | `GET /v1/models` | Bearer | LM Studio 패스스루 |
 | `POST /v1/chat/completions` | Bearer | 스트리밍 패스스루 |
-
-릴레이는 단독으로도 뜹니다:
-
-```powershell
-$env:RELAY_TOKEN='...'; node server/relay.mjs
-```
-
-## 참고
-
-- 터널 주소는 공개 URL입니다. 액세스 키가 유일한 방어선이니 링크를 공유하지 마세요.
-- 키는 `.sh-agent/access.key`에 저장되며 git에는 올라가지 않습니다.
-- Pages는 HTTPS라 `http://` 서버 주소는 브라우저가 차단합니다. 터널이 필요한 이유입니다.

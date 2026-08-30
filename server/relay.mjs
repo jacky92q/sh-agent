@@ -14,11 +14,14 @@
 
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
 
 const PORT = Number(process.env.RELAY_PORT || 8787);
 const HOST = process.env.RELAY_HOST || '127.0.0.1'; // 0.0.0.0 only when LAN access is wanted
 const UPSTREAM = (process.env.LMS_URL || 'http://127.0.0.1:1234').replace(/\/+$/, '');
-const TOKEN = process.env.RELAY_TOKEN || randomBytes(16).toString('base64url');
+const KEYS_FILE = process.env.RELAY_KEYS_FILE || '';
+const FALLBACK_TOKEN = process.env.RELAY_TOKEN || randomBytes(16).toString('base64url');
+const MAX_KEYS = 2; // one model on one machine; a third seat only makes a queue
 const MAX_BODY = 8 * 1024 * 1024;
 
 const CORS = {
@@ -43,12 +46,44 @@ function send(res, status, body, headers = {}) {
   res.end(payload);
 }
 
-function authorized(req) {
+let keys = [];
+let keysStamp = -1;
+
+/**
+ * Keys live in a file the launcher owns, re-read whenever it changes. Revoking
+ * someone therefore takes effect at once: restarting the relay would hand out a
+ * new tunnel address and break the other person's link along with it.
+ */
+function loadKeys() {
+  if (!KEYS_FILE) {
+    if (!keys.length) keys = [{ name: '나', key: FALLBACK_TOKEN }];
+    return;
+  }
+  try {
+    const stamp = statSync(KEYS_FILE).mtimeMs;
+    if (stamp === keysStamp) return;
+    keysStamp = stamp;
+    // PowerShell writes UTF-8 with a BOM, which JSON.parse refuses outright.
+    const parsed = JSON.parse(readFileSync(KEYS_FILE, 'utf8').replace(/^\uFEFF/, ''));
+    keys = (Array.isArray(parsed) ? parsed : [parsed])
+      .filter((k) => k && typeof k.key === 'string' && k.key)
+      .slice(0, MAX_KEYS);
+    log(`keys: ${keys.map((k) => k.name).join(', ') || '(none)'}`);
+  } catch {
+    keys = [];
+  }
+}
+
+/** Returns the name behind the key, or null. Comparison stays constant time. */
+function identify(req) {
+  loadKeys();
   const raw = req.headers.authorization || '';
-  const given = raw.startsWith('Bearer ') ? raw.slice(7) : raw;
-  const a = Buffer.from(given);
-  const b = Buffer.from(TOKEN);
-  return a.length === b.length && timingSafeEqual(a, b);
+  const given = Buffer.from(raw.startsWith('Bearer ') ? raw.slice(7) : raw);
+  for (const entry of keys) {
+    const known = Buffer.from(entry.key);
+    if (given.length === known.length && timingSafeEqual(given, known)) return entry.name || '?';
+  }
+  return null;
 }
 
 function readBody(req) {
@@ -132,17 +167,25 @@ const server = createServer(async (req, res) => {
 
   if (pathname === '/health') {
     const up = await upstreamAlive();
-    return send(res, 200, { relay: 'ok', upstream: up.ok, models: up.models, upstreamUrl: UPSTREAM });
+    loadKeys();
+    return send(res, 200, {
+      relay: 'ok',
+      upstream: up.ok,
+      models: up.models,
+      upstreamUrl: UPSTREAM,
+      seats: keys.length,
+    });
   }
 
-  if (!authorized(req)) {
+  const who = identify(req);
+  if (!who) {
     log(`\x1b[33m401\x1b[0m ${req.method} ${pathname}`);
     return send(res, 401, { error: { message: 'Invalid or missing access key.' } });
   }
 
   if (pathname === '/v1/models' && req.method === 'GET') return proxy(req, res, '/v1/models');
   if (pathname === '/v1/chat/completions' && req.method === 'POST') {
-    log(`\x1b[36m→\x1b[0m chat completion`);
+    log(`\x1b[36m→\x1b[0m ${who}`);
     return proxy(req, res, '/v1/chat/completions');
   }
 
@@ -155,11 +198,12 @@ server.headersTimeout = 0;
 
 server.listen(PORT, HOST, async () => {
   const up = await upstreamAlive();
+  loadKeys();
   console.log('');
   console.log('  \x1b[1msh-agent relay\x1b[0m');
   console.log(`  listening   http://localhost:${PORT}`);
   console.log(`  upstream    ${UPSTREAM} ${up.ok ? '\x1b[32m● online\x1b[0m' : '\x1b[31m● offline\x1b[0m'}`);
   if (up.ok && up.models.length) console.log(`  models      ${up.models.join(', ')}`);
-  console.log(`  access key  \x1b[1m${TOKEN}\x1b[0m`);
+  console.log(`  seats       ${keys.map((k) => k.name).join(', ') || '(none)'}  (최대 ${MAX_KEYS})`);
   console.log('');
 });

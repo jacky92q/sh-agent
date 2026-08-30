@@ -16,14 +16,19 @@ param(
     [int]$LmsPort = 1234,
     [string]$PagesUrl = 'https://jacky92q.github.io/sh-agent/',
     [switch]$NoTunnel,      # LAN only: skip cloudflared, print the local address
-    [switch]$NewKey,        # rotate the access key
-    [switch]$Restart        # stop a session that is already running and start fresh
+    [switch]$NewKey,        # rotate every key (everyone re-pairs)
+    [switch]$Restart,       # stop a session that is already running and start fresh
+    [string]$AddGuest,      # issue the second seat to someone, print their link
+    [string]$Revoke,        # take a seat back, effective immediately
+    [switch]$Seats          # list who currently holds a seat
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $stateDir = Join-Path $root '.sh-agent'
-$keyFile = Join-Path $stateDir 'access.key'
+$keyFile = Join-Path $stateDir 'access.key'   # legacy single key, migrated below
+$keysFile = Join-Path $stateDir 'keys.json'
+$MaxSeats = 2
 # Per-run name: a tunnel from an earlier run keeps its own log file open, and
 # Windows will not let us delete or reuse it while that process lives.
 $tunnelLog = Join-Path $stateDir "tunnel-$PID.log"
@@ -34,6 +39,51 @@ function Say($text, $color = 'Gray') { Write-Host $text -ForegroundColor $color 
 function Step($text) { Write-Host ''; Write-Host "  $text" -ForegroundColor White }
 
 if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Path $stateDir | Out-Null }
+
+# ------------------------------------------------------------------- seats
+# Two seats, hard stop. One machine runs one model; a third person would only
+# be queueing behind the other two.
+
+function New-AccessKey {
+    $bytes = New-Object byte[] 16
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function Read-Seats {
+    if (-not (Test-Path $keysFile)) { return @() }
+    # Get-Content in 5.1 decodes BOM-less UTF-8 as ANSI, which mangles Korean
+    # names and leaves ConvertFrom-Json staring at broken JSON.
+    try { return @([IO.File]::ReadAllText($keysFile) | ConvertFrom-Json) } catch { return @() }
+}
+
+function Write-Seats($seats) {
+    $list = @($seats)
+    $json = $list | ConvertTo-Json -Depth 4
+    # PowerShell 5.1 unwraps a one-element array into a bare object.
+    if ($list.Count -le 1) { $json = "[$json]" }
+    # Set-Content -Encoding utf8 prepends a BOM in 5.1, and JSON.parse chokes on it.
+    [IO.File]::WriteAllText($keysFile, $json, (New-Object Text.UTF8Encoding $false))
+}
+
+function Initialize-Seats {
+    $seats = Read-Seats
+    if ($seats.Count) { return $seats }
+    $mine = if (Test-Path $keyFile) { (Get-Content $keyFile -Raw).Trim() } else { New-AccessKey }
+    $seats = @([pscustomobject]@{ name = '나'; key = $mine; issued = (Get-Date).ToString('s') })
+    Write-Seats $seats
+    return $seats
+}
+
+function Show-Seats($seats) {
+    $list = @($seats)
+    Write-Host ''
+    Write-Host "  좌석 $($list.Count) / $MaxSeats" -ForegroundColor White
+    foreach ($seat in $list) {
+        Write-Host ("    {0,-10} {1}" -f $seat.name, $seat.key) -ForegroundColor DarkGray
+    }
+    Write-Host ''
+}
 
 function Test-RelayUp($port) {
     try {
@@ -60,13 +110,77 @@ function Write-PairingLink($url, $key) {
     return $link
 }
 
+# --------------------------------------------------------- seat management
+if ($NewKey) {
+    Remove-Item $keysFile, $keyFile -Force -ErrorAction SilentlyContinue
+    Say '  모든 키를 폐기했습니다. 두 사람 모두 다시 페어링해야 합니다.' 'Yellow'
+}
+$seatList = Initialize-Seats
+
+function Get-LiveSession {
+    if (-not (Test-Path $sessionFile)) { return $null }
+    try { return [IO.File]::ReadAllText($sessionFile) | ConvertFrom-Json } catch { return $null }
+}
+
+if ($Seats) {
+    Show-Seats $seatList
+    $live = Get-LiveSession
+    if ($live) { Say "  현재 주소  $($live.url)" } else { Say '  서버가 꺼져 있습니다.' }
+    exit 0
+}
+
+if ($Revoke) {
+    $target = $seatList | Where-Object { $_.name -eq $Revoke }
+    if (-not $target) {
+        Say "  '$Revoke' 좌석이 없습니다." 'Red'
+        Show-Seats $seatList
+        exit 1
+    }
+    if ($seatList[0].name -eq $Revoke) {
+        Say '  본인 좌석은 회수할 수 없습니다. 전체 교체는 -NewKey 를 쓰세요.' 'Red'
+        exit 1
+    }
+    Write-Seats (@($seatList | Where-Object { $_.name -ne $Revoke }))
+    Say "  '$Revoke' 차단 완료. 서버 재시작 없이 즉시 적용됩니다." 'Green'
+    Show-Seats (Read-Seats)
+    exit 0
+}
+
+if ($AddGuest) {
+    if ($seatList | Where-Object { $_.name -eq $AddGuest }) {
+        Say "  '$AddGuest' 은(는) 이미 좌석이 있습니다. 새 키가 필요하면 먼저 -Revoke 하세요." 'Yellow'
+        Show-Seats $seatList
+        exit 1
+    }
+    if (@($seatList).Count -ge $MaxSeats) {
+        Say "  좌석이 꽉 찼습니다 (최대 ${MaxSeats}명). 한 명을 회수한 뒤 다시 시도하세요:" 'Red'
+        Show-Seats $seatList
+        Say "    start.ps1 -Revoke <이름>" 'DarkGray'
+        exit 1
+    }
+
+    $guest = [pscustomobject]@{ name = $AddGuest; key = New-AccessKey; issued = (Get-Date).ToString('s') }
+    Write-Seats (@($seatList) + $guest)
+    Say "  '$AddGuest' 좌석을 발급했습니다. 서버 재시작 없이 바로 쓸 수 있습니다." 'Green'
+
+    $live = Get-LiveSession
+    if ($live -and $live.url) {
+        Write-PairingLink $live.url $guest.key | Out-Null
+        Say '  위 링크를 그 사람에게 보내세요. (클립보드에 복사됨)'
+    } else {
+        Say '  서버가 꺼져 있어 링크를 만들 수 없습니다. 서버를 켠 뒤 다시 실행하세요:' 'Yellow'
+        Say "    start.ps1 -AddGuest $AddGuest" 'DarkGray'
+    }
+    exit 0
+}
+
 # ------------------------------------------------------- already running?
 # Starting twice used to fail deep in the script with EADDRINUSE, after the
 # health probe had been fooled by the *previous* relay answering on the port.
 if (Test-RelayUp $RelayPort) {
     $prev = $null
     if (Test-Path $sessionFile) {
-        try { $prev = Get-Content $sessionFile -Raw | ConvertFrom-Json } catch { $prev = $null }
+        try { $prev = [IO.File]::ReadAllText($sessionFile) | ConvertFrom-Json } catch { $prev = $null }
     }
 
     if ($Restart) {
@@ -107,14 +221,7 @@ if (Test-RelayUp $RelayPort) {
 }
 
 # --------------------------------------------------------------- access key
-if ($NewKey -and (Test-Path $keyFile)) { Remove-Item $keyFile -Force }
-if (-not (Test-Path $keyFile)) {
-    $bytes = New-Object byte[] 16
-    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-    $key = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-    Set-Content -Path $keyFile -Value $key -Encoding ascii -NoNewline
-}
-$token = (Get-Content $keyFile -Raw).Trim()
+$token = $seatList[0].key
 
 # ------------------------------------------------------------- LM Studio up
 Step 'LM Studio'
@@ -152,7 +259,7 @@ try {
 
 # ------------------------------------------------------------------- relay
 Step 'Relay'
-$env:RELAY_TOKEN = $token
+$env:RELAY_KEYS_FILE = $keysFile
 $env:RELAY_PORT = "$RelayPort"
 $env:LMS_URL = "http://127.0.0.1:$LmsPort"
 # The tunnel reaches the relay over loopback; binding wider would only invite a
@@ -243,7 +350,7 @@ $session = [ordered]@{
     startedAt = (Get-Date).ToString('s')
 }
 if ($tunnel) { $session.tunnelPid = $tunnel.Id }
-$session | ConvertTo-Json | Set-Content -Path $sessionFile -Encoding utf8
+[IO.File]::WriteAllText($sessionFile, ($session | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
 
 if ($NoTunnel) {
     Say '  주의: GitHub Pages(HTTPS)에서는 http:// 주소를 호출할 수 없습니다.' 'Yellow'
