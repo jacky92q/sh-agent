@@ -25,7 +25,7 @@ winget install --id Cloudflare.cloudflared
 매번:
 
 ```powershell
-pwsh -File scripts/start.ps1
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1
 ```
 
 스크립트가 하는 일:

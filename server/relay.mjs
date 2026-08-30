@@ -16,7 +16,7 @@ import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 
 const PORT = Number(process.env.RELAY_PORT || 8787);
-const HOST = process.env.RELAY_HOST || '0.0.0.0';
+const HOST = process.env.RELAY_HOST || '127.0.0.1'; // 0.0.0.0 only when LAN access is wanted
 const UPSTREAM = (process.env.LMS_URL || 'http://127.0.0.1:1234').replace(/\/+$/, '');
 const TOKEN = process.env.RELAY_TOKEN || randomBytes(16).toString('base64url');
 const MAX_BODY = 8 * 1024 * 1024;

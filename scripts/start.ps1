@@ -1,4 +1,4 @@
-<#
+﻿<#
     sh-agent — one command to put the local model on the phone.
 
     Brings up, in order:
@@ -80,6 +80,9 @@ Step 'Relay'
 $env:RELAY_TOKEN = $token
 $env:RELAY_PORT = "$RelayPort"
 $env:LMS_URL = "http://127.0.0.1:$LmsPort"
+# The tunnel reaches the relay over loopback; binding wider would only invite a
+# firewall prompt. LAN mode is the one case that needs a routable interface.
+if ($NoTunnel) { $env:RELAY_HOST = '0.0.0.0' } else { $env:RELAY_HOST = '127.0.0.1' }
 
 $relay = Start-Process -FilePath 'node' -ArgumentList (Join-Path $root 'server\relay.mjs') `
     -WorkingDirectory $root -NoNewWindow -PassThru
