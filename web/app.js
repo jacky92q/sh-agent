@@ -2,7 +2,7 @@
  * sh-agent — web client
  *
  * Talks to the relay running on the user's PC (server/relay.mjs), which in turn
- * fronts LM Studio. Everything here is static: no build step, no dependencies.
+ * fronts Ollama. Everything here is static: no build step, no dependencies.
  */
 
 const $ = (id) => document.getElementById(id);
@@ -17,12 +17,14 @@ const state = {
   stream: null,
   stickToBottom: true,
   pairingFailed: false,
-  // Each entry is { id, kind: 'image', dataUrl } or { id, kind: 'doc', name, size, text, truncated }.
+  // Each entry is { id, kind: 'image', dataUrl }, { id, kind: 'doc', name, size, text, truncated },
+  // or { id, kind: 'audio', dataUrl, durationSec }.
   pendingAttachments: [],
 };
 
 const MAX_IMAGES = 4;
 const MAX_DOCS = 3;
+const MAX_AUDIO = 2;
 const DOC_CHAR_CAP = 4000; // ~1200 tokens; the loaded model's context window is small
 const MAX_DOC_BYTES = 3 * 1024 * 1024;
 
@@ -204,6 +206,8 @@ const newId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
 const DOC_ICON =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4M9 12h6M9 16h6"/></svg>';
+const AUDIO_ICON =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4M8 6v12M12 9v6M16 4v16M20 10v4"/></svg>';
 
 function renderAttachStrip() {
   const strip = $('attachStrip');
@@ -217,6 +221,9 @@ function renderAttachStrip() {
     if (item.kind === 'image') {
       chip.className = 'attach-chip image';
       chip.innerHTML = `<img src="${item.dataUrl}" alt="" />${kill}`;
+    } else if (item.kind === 'audio') {
+      chip.className = 'attach-chip doc';
+      chip.innerHTML = `${AUDIO_ICON}<span class="doc-name">${fmtDuration(item.durationSec)}</span>${kill}`;
     } else {
       chip.className = 'attach-chip doc';
       chip.innerHTML = `${DOC_ICON}<span class="doc-name">${esc(item.name)}</span>${kill}`;
@@ -232,11 +239,15 @@ function renderAttachStrip() {
   }
 }
 
+const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'm4a', 'ogg', 'oga', 'webm', 'flac', 'aac', 'opus']);
+const isAudioFile = (file) => file.type.startsWith('audio/') || AUDIO_EXTENSIONS.has((file.name.split('.').pop() || '').toLowerCase());
+
 async function addFiles(fileList) {
   const files = Array.from(fileList);
   if (!files.length) return;
   let imageOverflow = false;
   let docOverflow = false;
+  let audioOverflow = false;
 
   for (const file of files) {
     if (file.type.startsWith('image/')) {
@@ -249,9 +260,20 @@ async function addFiles(fileList) {
       continue;
     }
 
+    if (isAudioFile(file)) {
+      if (countPending('audio') >= MAX_AUDIO) { audioOverflow = true; continue; }
+      try {
+        const { dataUrl, durationSec } = await blobToWav(file);
+        state.pendingAttachments.push({ id: newId(), kind: 'audio', dataUrl, durationSec });
+      } catch {
+        toast(`${file.name} 을(를) 처리하지 못했습니다`);
+      }
+      continue;
+    }
+
     const kind = docKind(file);
     if (!kind) {
-      toast(`${file.name} 은(는) 지원하지 않는 형식입니다 (이미지 · 텍스트 · PDF만 가능)`);
+      toast(`${file.name} 은(는) 지원하지 않는 형식입니다 (이미지 · 오디오 · 텍스트 · PDF만 가능)`);
       continue;
     }
     if (countPending('doc') >= MAX_DOCS) { docOverflow = true; continue; }
@@ -269,6 +291,7 @@ async function addFiles(fileList) {
 
   if (imageOverflow) toast(`이미지는 최대 ${MAX_IMAGES}장까지 첨부할 수 있습니다`);
   if (docOverflow) toast(`파일은 최대 ${MAX_DOCS}개까지 첨부할 수 있습니다`);
+  if (audioOverflow) toast(`오디오는 최대 ${MAX_AUDIO}개까지 첨부할 수 있습니다`);
   renderAttachStrip();
   updateSendReady();
 }
@@ -384,7 +407,7 @@ stage.addEventListener('scroll', () => {
   state.stickToBottom = stage.scrollHeight - stage.scrollTop - stage.clientHeight < 130;
 });
 
-function addUserTurn(text, images = [], docs = []) {
+function addUserTurn(text, images = [], docs = [], audios = []) {
   const el = document.createElement('div');
   el.className = 'turn user';
 
@@ -397,6 +420,18 @@ function addUserTurn(text, images = [], docs = []) {
       badge.title = `${doc.text.length.toLocaleString()}자${doc.truncated ? ' · 일부만 전달됨' : ''}`;
       badge.innerHTML = `${DOC_ICON}<span class="doc-name">${esc(doc.name)}</span>`;
       row.append(badge);
+    }
+    el.append(row);
+  }
+  if (audios.length) {
+    const row = document.createElement('div');
+    row.className = 'user-audios';
+    for (const audio of audios) {
+      const player = document.createElement('audio');
+      player.className = 'audio-player';
+      player.controls = true;
+      player.src = audio.dataUrl;
+      row.append(player);
     }
     el.append(row);
   }
@@ -430,34 +465,44 @@ function addUserTurn(text, images = [], docs = []) {
  * during this feature's own development still have on disk.
  */
 function partsOf(content) {
-  if (typeof content === 'string') return { text: content, images: [], docs: [] };
+  if (typeof content === 'string') return { text: content, images: [], docs: [], audios: [] };
   if (Array.isArray(content)) {
     const text = content.filter((p) => p.type === 'text').map((p) => p.text).join('\n');
     const images = content.filter((p) => p.type === 'image_url').map((p) => p.image_url.url);
-    return { text, images, docs: [] };
+    return { text, images, docs: [], audios: [] };
   }
-  return { text: content.text || '', images: content.images || [], docs: content.docs || [] };
+  return {
+    text: content.text || '',
+    images: content.images || [],
+    docs: content.docs || [],
+    audios: content.audios || [],
+  };
 }
 
 /** What actually gets saved to localStorage for a new user turn. */
-function toStored(text, images, docs) {
-  if (!images.length && !docs.length) return text;
-  return { text, images, docs };
+function toStored(text, images, docs, audios) {
+  if (!images.length && !docs.length && !audios.length) return text;
+  return { text, images, docs, audios };
 }
 
 /**
  * What goes out over the wire. The API has no notion of an attached document,
  * so each one is folded into the text as a clearly delimited block ahead of
- * the user's own words — the model just reads it as more context.
+ * the user's own words — the model just reads it as more context. Audio has
+ * its own OpenAI-style part type, so it rides alongside images instead.
  */
 function toApiContent(content) {
-  const { text, images, docs } = partsOf(content);
+  const { text, images, docs, audios } = partsOf(content);
   const docText = docs
     .map((d) => `--- 첨부 파일: ${d.name} ---\n${d.text}${d.truncated ? '\n[이하 생략]' : ''}\n--- 파일 끝 ---`)
     .join('\n\n');
   const combined = [docText, text].filter(Boolean).join('\n\n');
-  if (!images.length) return combined;
+  if (!images.length && !audios.length) return combined;
   const parts = images.map((url) => ({ type: 'image_url', image_url: { url } }));
+  for (const a of audios) {
+    // input_audio wants raw base64, not a data: URL — unlike image_url.
+    parts.push({ type: 'input_audio', input_audio: { data: a.dataUrl.split(',')[1], format: 'wav' } });
+  }
   if (combined) parts.push({ type: 'text', text: combined });
   return parts;
 }
@@ -539,8 +584,8 @@ function paintThread() {
   $('overture').hidden = msgs.length > 0;
   for (const m of msgs) {
     if (m.role === 'user') {
-      const { text, images, docs } = partsOf(m.content);
-      addUserTurn(text, images, docs);
+      const { text, images, docs, audios } = partsOf(m.content);
+      addUserTurn(text, images, docs, audios);
     } else {
       const turn = addModelTurn();
       turn.el.classList.remove('live');
@@ -587,7 +632,7 @@ async function health(quiet) {
       signal: AbortSignal.timeout(7000),
     });
     const data = await r.json();
-    if (!data.upstream) { setLed('down', 'LM STUDIO 꺼짐'); return data; }
+    if (!data.upstream) { setLed('down', '모델 서버 꺼짐'); return data; }
     if (data.models?.length && !data.models.includes(state.cfg.model)) {
       state.cfg.model = data.models[0];
       saveConfig();
@@ -615,22 +660,22 @@ function fillModels(models) {
 
 /* ------------------------------------------------------------------ stream */
 
-async function send(text, images = [], docs = []) {
+async function send(text, images = [], docs = [], audios = []) {
   if (state.stream) return;
   const { endpoint, token } = state.cfg;
   if (!endpoint) { openSheet(); toast('서버 주소를 먼저 입력하세요'); return; }
 
   const chat = ensureChat();
   if (chat.messages.length === 0) {
-    chat.title = text.replace(/\s+/g, ' ').slice(0, 42) || docs[0]?.name || '이미지 메시지';
+    chat.title = text.replace(/\s+/g, ' ').slice(0, 42) || docs[0]?.name || (audios.length ? '음성 메시지' : '이미지 메시지');
   }
-  chat.messages.push({ role: 'user', content: toStored(text, images, docs) });
+  chat.messages.push({ role: 'user', content: toStored(text, images, docs, audios) });
   chat.at = Date.now();
   saveChats();
   paintHistory();
 
   $('overture').hidden = true;
-  addUserTurn(text, images, docs);
+  addUserTurn(text, images, docs, audios);
   scrollToEnd(true);
 
   const turn = addModelTurn();
@@ -808,81 +853,144 @@ $('composer').addEventListener('submit', (e) => {
   const text = input.value.trim();
   const images = state.pendingAttachments.filter((a) => a.kind === 'image').map((a) => a.dataUrl);
   const docs = state.pendingAttachments.filter((a) => a.kind === 'doc');
-  if (!text && !images.length && !docs.length) return;
+  const audios = state.pendingAttachments.filter((a) => a.kind === 'audio');
+  if (!text && !images.length && !docs.length && !audios.length) return;
   input.value = '';
   state.pendingAttachments = [];
   renderAttachStrip();
   autoGrow();
-  send(text, images, docs);
+  send(text, images, docs, audios);
 });
 
-/* ------------------------------------------------------------------- mic */
+/* ----------------------------------------------------------------- audio */
 
 /**
- * The model itself refuses audio input outright (`input_audio` gets a hard
- * error from LM Studio) — Gemma takes text and images only. A microphone
- * button that actually attached an audio file would just fail every time, so
- * this transcribes speech to text in the browser instead and drops it into
- * the composer, which is what "talk to it" means in practice.
+ * gemma4:e2b genuinely takes audio — confirmed by sending it a real spoken
+ * clip and getting back an answer derived from what was said, not a schema
+ * error. (That was never true running the same model under LM Studio: its
+ * backend, llama.cpp's own server, has no request-routing for input_audio at
+ * all. See the lmstudio-backend branch for that version.) So the mic records
+ * real audio rather than transcribing speech to text locally — recognition
+ * quality on a 2B model is well short of a dedicated ASR model, but it is
+ * actually listening.
  */
-const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+function encodeWav(pcm, sampleRate) {
+  const buf = new ArrayBuffer(44 + pcm.length * 2);
+  const view = new DataView(buf);
+  const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+  str(0, 'RIFF');
+  view.setUint32(4, 36 + pcm.length * 2, true);
+  str(8, 'WAVE');
+  str(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  str(36, 'data');
+  view.setUint32(40, pcm.length * 2, true);
+  for (let i = 0, off = 44; i < pcm.length; i++, off += 2) {
+    const s = Math.max(-1, Math.min(1, pcm[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return buf;
+}
 
-if (SpeechRecognitionCtor) {
+function bufferToBase64(buf) {
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+const MAX_AUDIO_SEC = 90;
+
+/** Any audio Blob → mono 16kHz WAV. 16kHz keeps the payload small and is what most speech models expect. */
+async function blobToWav(blob, maxSec = MAX_AUDIO_SEC) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC();
+  let decoded;
+  try {
+    decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
+  } finally {
+    ctx.close();
+  }
+  const rate = 16000;
+  const duration = Math.min(decoded.duration, maxSec);
+  const offline = new OfflineAudioContext(1, Math.ceil(duration * rate), rate);
+  const src = offline.createBufferSource();
+  src.buffer = decoded;
+  src.connect(offline.destination);
+  src.start(0, 0, duration);
+  const rendered = await offline.startRendering();
+  const base64 = bufferToBase64(encodeWav(rendered.getChannelData(0), rate));
+  return { dataUrl: `data:audio/wav;base64,${base64}`, durationSec: duration };
+}
+
+function fmtDuration(sec) {
+  sec = Math.max(0, Math.round(sec));
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+}
+
+async function attachAudioBlob(blob) {
+  if (countPending('audio') >= MAX_AUDIO) {
+    toast(`오디오는 최대 ${MAX_AUDIO}개까지 첨부할 수 있습니다`);
+    return;
+  }
+  try {
+    const { dataUrl, durationSec } = await blobToWav(blob);
+    state.pendingAttachments.push({ id: newId(), kind: 'audio', dataUrl, durationSec });
+    renderAttachStrip();
+    updateSendReady();
+  } catch {
+    toast('오디오를 처리하지 못했습니다');
+  }
+}
+
+const canRecord = Boolean(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+if (canRecord) {
   const micBtn = $('micBtn');
   micBtn.hidden = false;
 
-  const recognizer = new SpeechRecognitionCtor();
-  recognizer.lang = 'ko-KR';
-  recognizer.continuous = true;
-  recognizer.interimResults = true;
+  let recorder = null;
+  let chunks = [];
+  let stream = null;
+  let autoStop = null;
 
-  let listening = false;
-  let baseText = '';
-
-  const stop = () => {
-    listening = false;
+  function teardown() {
+    clearTimeout(autoStop);
     micBtn.classList.remove('recording');
-    try { recognizer.stop(); } catch {}
-  };
+    stream?.getTracks().forEach((t) => t.stop());
+    stream = null;
+  }
+
+  async function start() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      toast('마이크 권한이 필요합니다');
+      return;
+    }
+    chunks = [];
+    recorder = new MediaRecorder(stream);
+    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    recorder.onstop = async () => {
+      const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+      teardown();
+      if (blob.size > 300) await attachAudioBlob(blob);
+    };
+    recorder.start();
+    micBtn.classList.add('recording');
+    autoStop = setTimeout(() => recorder.state === 'recording' && recorder.stop(), MAX_AUDIO_SEC * 1000);
+  }
 
   micBtn.addEventListener('click', () => {
-    if (listening) { stop(); return; }
-    baseText = input.value ? `${input.value.trim()} ` : '';
-    listening = true;
-    micBtn.classList.add('recording');
-    try {
-      recognizer.start();
-    } catch {
-      // start() throws if a recognition session is already active anywhere
-      // on the page; treat it the same as a failed start.
-      listening = false;
-      micBtn.classList.remove('recording');
-    }
-  });
-
-  recognizer.addEventListener('result', (e) => {
-    let transcript = '';
-    for (const result of e.results) transcript += result[0].transcript;
-    input.value = baseText + transcript;
-    autoGrow();
-  });
-
-  recognizer.addEventListener('end', () => {
-    // iOS Safari ends the session on its own after a pause; reflect that
-    // instead of leaving the button stuck in its recording state.
-    listening = false;
-    micBtn.classList.remove('recording');
-  });
-
-  recognizer.addEventListener('error', (e) => {
-    listening = false;
-    micBtn.classList.remove('recording');
-    if (e.error === 'no-speech' || e.error === 'aborted') return;
-    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-      toast('마이크 권한이 필요합니다');
-    } else {
-      toast('음성 인식에 실패했습니다');
-    }
+    if (recorder?.state === 'recording') recorder.stop();
+    else start();
   });
 }
 
@@ -1001,7 +1109,7 @@ $('testBtn').addEventListener('click', async () => {
   }
   if (!data.upstream) {
     msg.className = 'probe-msg bad';
-    msg.textContent = '릴레이는 살아있지만 LM Studio 서버가 꺼져 있습니다.';
+    msg.textContent = '릴레이는 살아있지만 모델 서버가 꺼져 있습니다.';
     return;
   }
   // The key only matters on /v1/*, so verify it separately.

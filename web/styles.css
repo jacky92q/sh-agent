@@ -478,6 +478,11 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .doc-badge .doc-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
 .turn.user .user-docs:not(:last-child) { margin-bottom: 8px; }
 
+.user-audios { display: flex; flex-direction: column; gap: 6px; }
+.turn.user .user-audios:not(:last-child) { margin-bottom: 8px; }
+.audio-player { width: 100%; max-width: 240px; height: 34px; display: block; }
+.audio-player::-webkit-media-controls-panel { background: var(--bg-veil); }
+
 .composer-wrap {
   position: relative;
   z-index: 3;

@@ -1,6 +1,6 @@
 # sh-agent
 
-집 PC의 LM Studio에서 도는 모델을 폰에서 쓰는 웹 UI.
+집 PC의 Ollama에서 도는 모델을 폰에서 쓰는 웹 UI.
 
 **주소** → https://jacky92q.github.io/sh-agent/
 
@@ -12,13 +12,14 @@
 
 ### 1. PC 준비 (한 번만)
 
-LM Studio에서 모델을 받아두고(예: `google/gemma-4-e2b`), 터널 도구를 설치합니다.
+[Ollama](https://ollama.com/download)와 터널 도구를 설치합니다.
 
 ```powershell
 winget install --id Cloudflare.cloudflared
 ```
 
-설치 후 터미널을 새로 여세요.
+설치 후 터미널을 새로 여세요. 모델은 따로 받아둘 필요 없습니다 — `start.ps1`이 없으면 자동으로 받습니다
+(`gemma4:e2b`, 최초 1회만 · 약 7GB).
 
 ### 2. 서버 켜기
 
@@ -26,7 +27,10 @@ winget install --id Cloudflare.cloudflared
 powershell -ExecutionPolicy Bypass -File scripts\start.ps1
 ```
 
-LM Studio 서버 → 릴레이 → 터널이 차례로 뜨고, **페어링 링크**가 출력되면서 클립보드에 복사됩니다.
+Ollama 서버 → 릴레이 → 터널이 차례로 뜨고, **페어링 링크**가 출력되면서 클립보드에 복사됩니다.
+
+> GPU 메모리가 작다면(4GB 이하) LM Studio와 Ollama를 동시에 켜두지 마세요. 스크립트가 시작할 때
+> LM Studio 쪽 GPU 사용을 자동으로 정리하지만, 두 서버를 동시에 쓰는 구성은 원래 지원하지 않습니다.
 
 ### 3. 폰에서 링크 열기
 
@@ -113,7 +117,8 @@ powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -Revoke 민수
 | `-Restart` | 실행 중인 세션을 끄고 새로 띄움 (주소가 바뀝니다) |
 | `-NewKey` | 모든 키 폐기 (두 사람 모두 재페어링) |
 | `-NoTunnel` | 터널 없이 LAN 주소만 (PC에서 로컬로 열 때만) |
-| `-RelayPort` / `-LmsPort` | 포트 변경 |
+| `-RelayPort` / `-ModelPort` | 포트 변경 |
+| `-ModelName` | 사용할 모델 태그 (기본 `gemma4:e2b`) |
 
 ---
 
@@ -132,10 +137,10 @@ powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -Revoke 민수
 ## 구조
 
 ```
-폰 브라우저 → GitHub Pages(정적 UI) → Cloudflare 터널 → 릴레이 :8787 → LM Studio :1234
+폰 브라우저 → GitHub Pages(정적 UI) → Cloudflare 터널 → 릴레이 :8787 → Ollama :11434
 ```
 
-GitHub Pages는 HTTPS라 `http://집IP:1234`를 직접 부르면 브라우저가 차단합니다. 터널이 필요한 이유입니다.
+GitHub Pages는 HTTPS라 `http://집IP:11434`를 직접 부르면 브라우저가 차단합니다. 터널이 필요한 이유입니다.
 
 | 경로 | 역할 |
 | --- | --- |
@@ -156,5 +161,5 @@ GitHub Pages는 HTTPS라 `http://집IP:1234`를 직접 부르면 브라우저가
 | 엔드포인트 | 인증 | 설명 |
 | --- | --- | --- |
 | `GET /health` | 없음 | 릴레이/모델 상태, 좌석 수 |
-| `GET /v1/models` | Bearer | LM Studio 패스스루 |
+| `GET /v1/models` | Bearer | Ollama 패스스루 |
 | `POST /v1/chat/completions` | Bearer | 스트리밍 패스스루 |

@@ -1,13 +1,18 @@
 /**
  * sh-agent relay
  *
- * Sits between the public web UI and the LM Studio server running on this PC.
- *   phone -> https tunnel -> relay (this file) -> http://127.0.0.1:1234 (LM Studio)
+ * Sits between the public web UI and the Ollama server running on this PC.
+ *   phone -> https tunnel -> relay (this file) -> http://127.0.0.1:11434 (Ollama)
  *
  * It exists for three reasons:
  *   1. a tunnel URL is public, so the endpoint needs a token gate
- *   2. the browser needs CORS headers LM Studio does not always send
+ *   2. the browser needs CORS headers the model server does not send
  *   3. one stable /health surface to drive the UI's connection indicator
+ *
+ * Backend-agnostic by design: anything with an OpenAI-compatible /v1/models
+ * and /v1/chat/completions works here. This shipped against LM Studio first;
+ * switching to Ollama (for real audio-input support — see git history and
+ * the lmstudio-backend branch) only meant changing MODEL_SERVER_URL below.
  *
  * No dependencies. Node 18+.
  */
@@ -18,7 +23,7 @@ import { readFileSync, statSync } from 'node:fs';
 
 const PORT = Number(process.env.RELAY_PORT || 8787);
 const HOST = process.env.RELAY_HOST || '127.0.0.1'; // 0.0.0.0 only when LAN access is wanted
-const UPSTREAM = (process.env.LMS_URL || 'http://127.0.0.1:1234').replace(/\/+$/, '');
+const UPSTREAM = (process.env.MODEL_SERVER_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
 const KEYS_FILE = process.env.RELAY_KEYS_FILE || '';
 const FALLBACK_TOKEN = process.env.RELAY_TOKEN || randomBytes(16).toString('base64url');
 const MAX_KEYS = 2; // one model on one machine; a third seat only makes a queue
@@ -111,8 +116,8 @@ async function upstreamAlive() {
     const r = await fetch(`${UPSTREAM}/v1/models`, { signal: AbortSignal.timeout(2500) });
     if (!r.ok) return { ok: false, models: [] };
     const data = await r.json();
-    // LM Studio lists embedding models alongside chat models; the UI would
-    // happily pick one as a default, so keep them out of the health report.
+    // The catalog can list embedding models alongside chat models; the UI
+    // would happily pick one as a default, so keep them out of the health report.
     const models = (data?.data || []).map((m) => m.id).filter((id) => !/embed/i.test(id));
     return { ok: true, models };
   } catch {
@@ -120,7 +125,7 @@ async function upstreamAlive() {
   }
 }
 
-/** Forward a request to LM Studio, streaming the response through untouched. */
+/** Forward a request to the model server, streaming the response through untouched. */
 async function proxy(req, res, path) {
   const body = req.method === 'POST' ? await readBody(req) : undefined;
   const abort = new AbortController();
@@ -137,7 +142,7 @@ async function proxy(req, res, path) {
   } catch (err) {
     log('\x1b[31mupstream unreachable\x1b[0m', err.message);
     return send(res, 502, {
-      error: { message: 'LM Studio server is not reachable. Start it with: lms server start' },
+      error: { message: 'Model server is not reachable. Start it with: ollama serve' },
     });
   }
 

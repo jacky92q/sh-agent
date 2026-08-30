@@ -2,18 +2,24 @@
     sh-agent — one command to put the local model on the phone.
 
     Brings up, in order:
-      1. the LM Studio OpenAI-compatible server   (localhost:1234)
+      1. the Ollama OpenAI-compatible server      (localhost:11434)
       2. the relay                                (localhost:8787, token gated)
       3. a Cloudflare quick tunnel                (https://<random>.trycloudflare.com)
 
     Then prints a pairing link for https://jacky92q.github.io/sh-agent/.
     Ctrl+C tears everything back down.
+
+    Ollama, not LM Studio: llama.cpp's own server (what LM Studio wraps) has
+    no code path for audio input at all — see the commit that made this
+    switch, or run `git log -1` on the lmstudio-backend branch, which is the
+    old LM-Studio-based version of this whole script kept as a snapshot.
 #>
 
 [CmdletBinding()]
 param(
     [int]$RelayPort = 8787,
-    [int]$LmsPort = 1234,
+    [int]$ModelPort = 11434,
+    [string]$ModelName = 'gemma4:e2b',
     [string]$PagesUrl = 'https://jacky92q.github.io/sh-agent/',
     [switch]$NoTunnel,      # LAN only: skip cloudflared, print the local address
     [switch]$NewKey,        # rotate every key (everyone re-pairs)
@@ -223,37 +229,74 @@ if (Test-RelayUp $RelayPort) {
 # --------------------------------------------------------------- access key
 $token = $seatList[0].key
 
-# ------------------------------------------------------------- LM Studio up
-Step 'LM Studio'
-$lms = Join-Path $env:USERPROFILE '.lmstudio\bin\lms.exe'
-if (-not (Test-Path $lms)) {
-    $found = Get-Command lms -ErrorAction SilentlyContinue
-    if ($found) { $lms = $found.Source } else { $lms = $null }
+# ----------------------------------------------------------------- Ollama
+Step 'Ollama'
+
+# On a 4GB card, LM Studio's llama-server holding VRAM is exactly what once
+# made Ollama's GPU discovery hang for minutes on this machine — not a bad
+# install, just two backends fighting over the same GPU. Clear the way.
+$gpuHogs = @(Get-Process 'llama-server', 'LM Studio' -ErrorAction SilentlyContinue)
+if ($gpuHogs.Count) {
+    Say "    LM Studio가 GPU를 쓰고 있어 종료합니다 (Ollama와 동시에 못 씀)..." 'Yellow'
+    $gpuHogs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
 }
 
-$lmsUp = $false
-try {
-    Invoke-RestMethod -Uri "http://127.0.0.1:$LmsPort/v1/models" -TimeoutSec 3 | Out-Null
-    $lmsUp = $true
-} catch { $lmsUp = $false }
+$ollama = (Get-Command ollama -ErrorAction SilentlyContinue).Source
+if (-not $ollama) {
+    $ollama = Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe'
+    if (-not (Test-Path $ollama)) { $ollama = $null }
+}
+if (-not $ollama) {
+    Say '    ollama를 찾지 못했습니다. https://ollama.com/download 에서 설치하세요.' 'Red'
+    exit 1
+}
 
-if (-not $lmsUp) {
-    if (-not $lms) {
-        Say '    lms CLI를 찾지 못했습니다. LM Studio에서 Developer > Start Server를 켜주세요.' 'Yellow'
-    } else {
-        Say "    서버 시작 중 (port $LmsPort)..."
-        & $lms server start --port $LmsPort | Out-Null
-        Start-Sleep -Milliseconds 1500
+function Test-OllamaUp {
+    try { Invoke-RestMethod -Uri "http://127.0.0.1:$ModelPort/api/version" -TimeoutSec 3 | Out-Null; return $true }
+    catch { return $false }
+}
+
+if (-not (Test-OllamaUp)) {
+    # Not the tray app: that one refuses to start a second time when an
+    # earlier crashed instance is still holding its own singleton lock, and
+    # that stuck lock is exactly what "Ollama won't start" usually is. The
+    # CLI server is a plain child process with none of that.
+    Say '    서버 시작 중...'
+    Start-Process -FilePath $ollama -ArgumentList 'serve' -WindowStyle Hidden
+    # First request after "Listening" can take up to ~90s (GPU/model-list
+    # warm-up) even with the GPU free, so this waits rather than failing fast.
+    $deadline = (Get-Date).AddSeconds(90)
+    while (-not (Test-OllamaUp) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+}
+
+if (-not (Test-OllamaUp)) {
+    Say '    Ollama 서버가 응답하지 않습니다. 다른 GPU 사용 프로그램을 모두 끄고 다시 시도하세요.' 'Red'
+    exit 1
+}
+
+$haveModel = $false
+try {
+    $tags = & $ollama list 2>&1
+    $haveModel = ($tags -join "`n") -match [regex]::Escape($ModelName)
+} catch { $haveModel = $false }
+
+if (-not $haveModel) {
+    Say "    $ModelName 를 받는 중 (최초 1회, 수 GB)..." 'Yellow'
+    & $ollama pull $ModelName
+    if ($LASTEXITCODE -ne 0) {
+        Say "    $ModelName 다운로드에 실패했습니다." 'Red'
+        exit 1
     }
 }
 
 $models = @()
 try {
-    $res = Invoke-RestMethod -Uri "http://127.0.0.1:$LmsPort/v1/models" -TimeoutSec 5
+    $res = Invoke-RestMethod -Uri "http://127.0.0.1:$ModelPort/v1/models" -TimeoutSec 5
     $models = $res.data | ForEach-Object { $_.id }
     Say "    online · $($models -join ', ')" 'Green'
 } catch {
-    Say '    LM Studio 서버에 연결하지 못했습니다. 앱을 켜고 다시 실행하세요.' 'Red'
+    Say '    Ollama 서버에 연결하지 못했습니다.' 'Red'
     exit 1
 }
 
@@ -261,7 +304,7 @@ try {
 Step 'Relay'
 $env:RELAY_KEYS_FILE = $keysFile
 $env:RELAY_PORT = "$RelayPort"
-$env:LMS_URL = "http://127.0.0.1:$LmsPort"
+$env:MODEL_SERVER_URL = "http://127.0.0.1:$ModelPort"
 # The tunnel reaches the relay over loopback; binding wider would only invite a
 # firewall prompt. LAN mode is the one case that needs a routable interface.
 if ($NoTunnel) { $env:RELAY_HOST = '0.0.0.0' } else { $env:RELAY_HOST = '127.0.0.1' }
