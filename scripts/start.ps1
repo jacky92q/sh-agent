@@ -103,8 +103,16 @@ $publicUrl = "http://localhost:$RelayPort"
 
 if (-not $NoTunnel) {
     Step 'Tunnel'
-    $cf = Get-Command cloudflared -ErrorAction SilentlyContinue
-    if (-not $cf) {
+    # winget updates the machine PATH, which an already-open shell will not see,
+    # so fall back to the places the MSI actually puts it.
+    $cfPath = (Get-Command cloudflared -ErrorAction SilentlyContinue).Source
+    if (-not $cfPath) {
+        $cfPath = @(
+            (Join-Path $env:ProgramFiles 'cloudflared\cloudflared.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'cloudflared\cloudflared.exe')
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    }
+    if (-not $cfPath) {
         Say '    cloudflared가 없습니다. 아래 명령으로 설치한 뒤 다시 실행하세요:' 'Yellow'
         Say '      winget install --id Cloudflare.cloudflared' 'White'
         Say '    (설치 없이 같은 Wi-Fi에서만 쓰려면 -NoTunnel 옵션을 사용하세요.)'
@@ -113,7 +121,7 @@ if (-not $NoTunnel) {
     }
 
     if (Test-Path $tunnelLog) { Remove-Item $tunnelLog -Force }
-    $tunnel = Start-Process -FilePath $cf.Source `
+    $tunnel = Start-Process -FilePath $cfPath `
         -ArgumentList @('tunnel', '--no-autoupdate', '--url', "http://localhost:$RelayPort") `
         -NoNewWindow -PassThru -RedirectStandardError $tunnelLog -RedirectStandardOutput "$tunnelLog.out"
     $procs += $tunnel

@@ -202,6 +202,7 @@ function addModelTurn() {
   const toggle = think.querySelector('.think-toggle');
   const label = think.querySelector('.think-label');
   const thinkBody = think.querySelector('.think-body');
+  let sealedLabel = null;
   toggle.addEventListener('click', () => {
     const open = think.classList.toggle('open');
     toggle.setAttribute('aria-expanded', String(open));
@@ -219,13 +220,14 @@ function addModelTurn() {
       thinkBody.scrollTop = thinkBody.scrollHeight;
     },
     sealThinking(seconds) {
+      // Remember the duration even when the fold is not on screen yet: in a
+      // backgrounded tab no frame has painted, so the answer can start before
+      // the reasoning has ever been revealed.
+      if (seconds) sealedLabel = `생각 과정 · ${seconds}초`;
       if (think.hidden) return;
       think.classList.remove('open');
       toggle.setAttribute('aria-expanded', 'false');
-      // The stream seals once with a duration; the finally block seals again as
-      // a safety net and must not wipe the duration already on screen.
-      if (seconds) label.textContent = `생각 과정 · ${seconds}초`;
-      else if (label.textContent === '생각하는 중') label.textContent = '생각 과정';
+      label.textContent = sealedLabel || '생각 과정';
     },
   };
 }
@@ -440,6 +442,10 @@ async function send(text) {
     if (controller.signal.aborted) {
       paint();
       if (!commit()) turn.el.remove();
+    } else if (commit()) {
+      // A phone that locks mid-answer drops the connection. Keep the partial
+      // reply rather than throwing away what the model already said.
+      addNotice(`<b>연결이 끊겼습니다</b> · 여기까지만 받았습니다`);
     } else {
       turn.el.remove();
       addNotice(`<b>실패</b> · ${esc(err.message)}`);
