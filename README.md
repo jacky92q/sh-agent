@@ -104,6 +104,48 @@ Ollama 서버 → 릴레이 → 터널이 차례로 뜨고, **페어링 링크**
 
 ---
 
+## 첫 응답이 한참 걸릴 때
+
+메시지를 보냈는데 `...` 만 오래 떠 있다면, 대개 **Ollama가 모델을 메모리에 다시 올리는 중**입니다.
+앱이 이제 그 상태를 글로 알려줍니다 — "모델을 메모리에 올리는 중" 이 뜨면 기다리면 됩니다.
+
+이 PC에서 실측한 차이입니다.
+
+| 상태 | 첫 글자까지 |
+| --- | --- |
+| 모델이 메모리에 있음 (warm) | **0.4 ~ 1.8초** |
+| 모델을 다시 올려야 함 (cold) | **87 ~ 97초** |
+
+`gemma4:e2b`는 6.8GB인데 GPU가 4GB라 78%가 시스템 RAM에 올라갑니다. 그래서 한 번 내려가면
+수 GB를 디스크에서 다시 읽어야 하고, 그게 저 90초입니다.
+
+**왜 자주 그랬냐면** Ollama 기본값이 *마지막 요청 후 5분* 뒤 모델을 내리는 것이기 때문입니다.
+답을 읽고 생각하다 6분 뒤에 다음 질문을 하면 그때마다 90초를 다시 내는 구조였습니다.
+
+지금은 두 가지로 막습니다.
+
+1. `start.ps1`이 뜰 때 모델을 **미리 올려둡니다** — 폰에서 보내는 첫 메시지부터 빠릅니다.
+2. 릴레이가 매 응답 후 유지 시간을 **30분으로 갱신**합니다 (기본값 5분 → 30분).
+
+```powershell
+# 유지 시간 바꾸기 (RAM을 빨리 돌려받고 싶으면 짧게)
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -KeepAlive 10m
+
+# 아예 안 내려가게
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -KeepAlive -1
+
+# 예열 없이 바로 띄우기 (터널만 필요할 때)
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -NoWarmup
+```
+
+> **RAM을 봐가면서 정하세요.** 이 PC는 RAM이 7.4GB인데 모델이 올라가면 여유가 0.4GB까지 떨어집니다.
+> 그 상태를 30분 유지한다는 뜻이라, 채팅을 안 하는 동안에도 PC가 무거우면 `-KeepAlive 10m` 정도로 줄이세요.
+> 반대로 RAM이 넉넉하면 `-1`로 두는 게 제일 쾌적합니다.
+
+`e4b`는 9.6GB라 더 심합니다. 두 모델을 번갈아 쓰면 매번 서로를 밀어내면서 재적재가 걸립니다.
+
+---
+
 ## 앱처럼 설치하기
 
 크롬에서 열면 주소창 옆 **설치** 아이콘(또는 메뉴 → 홈 화면에 추가)이 뜹니다. 설치하면 아이콘이 생기고
@@ -188,6 +230,8 @@ powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -Revoke 민수
 | `-NoTunnel` | 터널 없이 LAN 주소만 (PC에서 로컬로 열 때만) |
 | `-RelayPort` / `-ModelPort` | 포트 변경 |
 | `-ModelName` | 사용할 모델 태그 (기본 `gemma4:e2b`) |
+| `-KeepAlive` | 마지막 요청 뒤 모델을 메모리에 붙잡아 둘 시간 (기본 `30m`, `-1`은 무기한) |
+| `-NoWarmup` | 시작할 때 모델을 미리 올리지 않음 |
 
 ---
 
@@ -199,6 +243,7 @@ powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -Revoke 민수
 | 빨간 불 · "연결 실패" | PC의 `start.ps1`이 꺼졌거나 주소가 바뀌었습니다. 새 링크를 여세요 |
 | 빨간 불 · "LM STUDIO 꺼짐" | 릴레이는 살아있지만 모델 서버가 꺼졌습니다 |
 | 고친 게 폰에 반영이 안 된다 | 배포 후 최대 10분간 HTML이 캐시됩니다. 새로고침하세요 |
+| 첫 응답이 1~2분 걸린다 | 모델 재적재입니다. 위 [첫 응답이 한참 걸릴 때](#첫-응답이-한참-걸릴-때) 참고 |
 | `EADDRINUSE` | 이미 실행 중입니다. `-Restart`를 붙이세요 |
 
 ---
@@ -260,7 +305,7 @@ GitHub Pages는 HTTPS라 `http://집IP:11434`를 직접 부르면 브라우저�
 
 | 엔드포인트 | 인증 | 설명 |
 | --- | --- | --- |
-| `GET /health` | 없음 | 릴레이/모델 상태, 좌석 수 |
+| `GET /health` | 없음 | 릴레이/모델 상태, 좌석 수, 지금 메모리에 올라온 모델 |
 | `GET /v1/models` | Bearer | Ollama 패스스루 |
 | `POST /v1/chat/completions` | Bearer | 스트리밍 패스스루 · `x-job-id` 반환 |
 | `GET /v1/jobs/:id` | Bearer | 끊긴 응답 이어받기 |

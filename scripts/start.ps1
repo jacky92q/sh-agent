@@ -20,6 +20,8 @@ param(
     [int]$RelayPort = 8787,
     [int]$ModelPort = 11434,
     [string]$ModelName = 'gemma4:e2b',
+    [string]$KeepAlive = '30m',   # how long Ollama holds the model in RAM after the last message
+    [switch]$NoWarmup,            # skip preloading the model at startup
     [string]$PagesUrl = 'https://jacky92q.github.io/sh-agent/',
     [switch]$NoTunnel,      # LAN only: skip cloudflared, print the local address
     [switch]$NewKey,        # rotate every key (everyone re-pairs)
@@ -300,10 +302,34 @@ try {
     exit 1
 }
 
+# ------------------------------------------------------------------ warmup
+# Ollama drops a model from memory five minutes after the last request. On a
+# 4GB card a 6.8GB model sits mostly in system RAM, so reloading it means
+# reading gigabytes back off disk: measured here at 97s to the first token
+# cold against 0.4s warm. Five minutes is shorter than an ordinary pause
+# between chat messages, which is why nearly every message after a short
+# break used to stall. Loading it now means the first message from the phone
+# is already fast, and the relay keeps pushing the timer out from there.
+if (-not $NoWarmup) {
+    Step 'Warmup'
+    Say "    $ModelName 을(를) 메모리에 올리는 중... (최초 1회 1~2분)"
+    $warmStart = Get-Date
+    try {
+        $payload = @{ model = $ModelName; keep_alive = $KeepAlive } | ConvertTo-Json -Compress
+        Invoke-RestMethod -Uri "http://127.0.0.1:$ModelPort/api/generate" -Method Post `
+            -Body $payload -ContentType 'application/json' -TimeoutSec 300 | Out-Null
+        $secs = [int]((Get-Date) - $warmStart).TotalSeconds
+        Say "    준비됨 · ${secs}초 걸렸습니다 · 마지막 요청 뒤 $KeepAlive 동안 유지됩니다" 'Green'
+    } catch {
+        Say '    예열에 실패했습니다. 첫 메시지가 느릴 수 있습니다.' 'Yellow'
+    }
+}
+
 # ------------------------------------------------------------------- relay
 Step 'Relay'
 $env:RELAY_KEYS_FILE = $keysFile
 $env:RELAY_PORT = "$RelayPort"
+$env:RELAY_KEEP_ALIVE = $KeepAlive
 $env:MODEL_SERVER_URL = "http://127.0.0.1:$ModelPort"
 # The tunnel reaches the relay over loopback; binding wider would only invite a
 # firewall prompt. LAN mode is the one case that needs a routable interface.

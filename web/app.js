@@ -667,6 +667,20 @@ function addModelTurn(id = null, at = null) {
   body.className = 'body';
   body.innerHTML = '<span class="thinking"><i></i><i></i><i></i></span>';
 
+  // The dots alone are a lie by omission when the wait is 90 seconds because
+  // Ollama is hauling a 6.8GB model back off disk. waitNote() puts a real
+  // explanation under them; runCompletion decides which one applies.
+  let note = null;
+  const setWaitNote = (title, detail) => {
+    if (!title) { note?.remove(); note = null; return; }
+    if (!note) {
+      note = document.createElement('div');
+      note.className = 'wait-note';
+      body.append(note);
+    }
+    note.innerHTML = `<b>${esc(title)}</b>${detail ? `<span>${esc(detail)}</span>` : ''}`;
+  };
+
   const actions = document.createElement('div');
   actions.className = 'turn-actions';
   actions.innerHTML =
@@ -699,8 +713,12 @@ function addModelTurn(id = null, at = null) {
     el,
     body,
     setTime,
+    setWaitNote,
     setId(newMsgId) { el.dataset.msgId = newMsgId; },
     showThinking(text) {
+      // Anything arriving means the model is running, so whatever the wait
+      // note was explaining is over.
+      setWaitNote(null);
       // Reveal the collapsed summary bar; never force it open — that was the
       // whole point, the raw trace only shows up if someone taps for it.
       think.hidden = false;
@@ -1046,6 +1064,45 @@ async function runCompletion(chat) {
 
   let jobId = null;
 
+  /**
+   * Explain a long silence before the first token.
+   *
+   * The chat response itself is no help: Ollama withholds even the response
+   * headers until the model has finished loading, so a cold start looks
+   * exactly like a fast one right up until it doesn't. /health, though,
+   * reports which models are actually resident — a model that was asked for
+   * and isn't in that list is being loaded off disk, which on this hardware
+   * is a ~90 second wait rather than a ~1 second one. Worth saying out loud.
+   */
+  let waitTimer = null;
+  const waitWatch = setTimeout(async function check() {
+    if (state.stream !== controller) return;
+    let cold = false;
+    try {
+      const r = await fetch(`${endpoint.replace(/\/+$/, '')}/health`, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(5000),
+      });
+      const data = await r.json();
+      const want = state.cfg.model;
+      cold = Array.isArray(data.loaded) && want ? !data.loaded.includes(want) : false;
+    } catch {}
+    if (state.stream !== controller) return;
+    if (cold) {
+      turn.setWaitNote('모델을 메모리에 올리는 중', '이 PC에서는 1~2분 걸립니다. 한 번 올라가면 다음 질문부터는 바로 답합니다.');
+    } else {
+      turn.setWaitNote('질문을 읽는 중', '대화가 길거나 첨부가 많으면 첫 글자까지 시간이 걸립니다.');
+    }
+    // Re-check: a load finishing mid-wait should flip the message over to
+    // the prefill one rather than leave a stale explanation on screen.
+    waitTimer = setTimeout(check, 6000);
+  }, 4000);
+  const stopWaitWatch = () => {
+    clearTimeout(waitWatch);
+    clearTimeout(waitTimer);
+    turn.setWaitNote(null);
+  };
+
   try {
     const res = await fetch(`${endpoint.replace(/\/+$/, '')}/v1/chat/completions`, {
       method: 'POST',
@@ -1098,6 +1155,7 @@ async function runCompletion(chat) {
           // Ollama sends this as `reasoning`; LM Studio (and OpenAI) call the
           // same thing `reasoning_content`. Take whichever shows up.
           const reasoningDelta = delta.reasoning ?? delta.reasoning_content;
+          if (reasoningDelta || delta.content) stopWaitWatch();
           if (reasoningDelta) {
             reasoning += reasoningDelta;
             schedule();
@@ -1149,6 +1207,7 @@ async function runCompletion(chat) {
       addNotice(`<b>실패</b> · ${esc(err.message)}`, { retry: true });
     }
   } finally {
+    stopWaitWatch();
     turn.el.classList.remove('live');
     turn.sealThinking();
     state.stream = null;

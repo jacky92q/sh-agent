@@ -31,6 +31,22 @@ const MAX_KEYS = 2; // one model on one machine; a third seat only makes a queue
 // conversation is resent each request — a few image turns adds up fast.
 const MAX_BODY = 24 * 1024 * 1024;
 
+/**
+ * How long Ollama should hold the model in memory after the last request.
+ *
+ * This matters more than it sounds. Ollama's own default is five minutes,
+ * and a 6.8GB model on a 4GB card lands ~78% in system RAM — so reloading it
+ * means pulling gigabytes off disk again. Measured on this machine: 97s to
+ * the first token cold, 0.4s warm. Five minutes is shorter than a normal
+ * pause between chat messages, so the default setting made almost every
+ * message after a break pay the full reload.
+ *
+ * The OpenAI-compatible endpoint silently ignores a keep_alive field, so the
+ * only way to set this from here is a separate call against the native API
+ * once a request has gone through — see touchModel().
+ */
+const KEEP_ALIVE = process.env.RELAY_KEEP_ALIVE || '30m';
+
 const CORS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET,POST,OPTIONS',
@@ -233,6 +249,41 @@ async function upstreamAlive() {
   }
 }
 
+/**
+ * Which models are resident right now. Ollama only lists a model here once it
+ * has finished loading, so "asked for, but absent from this list" is exactly
+ * the signal the UI needs to say "loading" rather than showing bare dots —
+ * the chat response itself gives nothing away, since its headers do not
+ * arrive until the load is over (measured: 70s of silence, then headers and
+ * the first token together).
+ */
+async function loadedModels() {
+  try {
+    const r = await fetch(`${UPSTREAM}/api/ps`, { signal: AbortSignal.timeout(2500) });
+    if (!r.ok) return [];
+    return ((await r.json())?.models || []).map((m) => m.name);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Push the eviction timer out to KEEP_ALIVE. An empty-prompt /api/generate
+ * loads nothing and generates nothing when the model is already in memory —
+ * it just resets the clock, and returns in about a tenth of a second.
+ */
+async function touchModel(model) {
+  if (!model) return;
+  try {
+    await fetch(`${UPSTREAM}/api/generate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model, keep_alive: KEEP_ALIVE }),
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch {}
+}
+
 /** Forward a request to the model server, streaming the response through untouched. */
 async function proxy(req, res, path) {
   const body = req.method === 'POST' ? await readBody(req) : undefined;
@@ -326,6 +377,13 @@ async function handleChatCompletion(req, res, client) {
     log(C.cyan('→'), tag(client), C.dim('(본문을 읽지 못함)'));
   }
 
+  // Worth calling out on its own line: a cold model is the difference between
+  // a half-second wait and a minute and a half of nothing happening.
+  const wanted = info && info.model !== '(기본)' ? info.model : null;
+  const resident = await loadedModels();
+  const cold = wanted ? !resident.includes(wanted) : resident.length === 0;
+  if (cold) log(C.yellow('⏳'), tag(client), C.yellow('모델을 메모리에 올리는 중 — 첫 응답이 늦습니다'));
+
   const id = randomBytes(9).toString('base64url');
   const upstreamAbort = new AbortController();
   const job = {
@@ -416,6 +474,10 @@ async function handleChatCompletion(req, res, client) {
   job.done = true;
   report();
   if (downstreamAlive) { try { res.end(); } catch {} }
+  // Ollama would otherwise drop the model five minutes from now, and the next
+  // message would pay the full reload. Done after the answer so it never adds
+  // latency to the request that triggered it.
+  touchModel(wanted || resident[0]);
 }
 
 const server = createServer(async (req, res) => {
@@ -433,6 +495,10 @@ const server = createServer(async (req, res) => {
       relay: 'ok',
       upstream: up.ok,
       models: up.models,
+      // What the UI uses to explain a long silence before the first token:
+      // a model that was asked for but is not in here is being loaded.
+      loaded: up.ok ? await loadedModels() : [],
+      keepAlive: KEEP_ALIVE,
       upstreamUrl: UPSTREAM,
       seats: keys.length,
     });
@@ -502,6 +568,7 @@ server.listen(PORT, HOST, async () => {
   console.log(`  upstream    ${UPSTREAM} ${up.ok ? C.green('● online') : C.red('● offline')}`);
   if (up.ok && up.models.length) console.log(`  models      ${up.models.join(', ')}`);
   console.log(`  seats       ${keys.map((k) => k.name).join(', ') || '(none)'}  (최대 ${MAX_KEYS})`);
+  console.log(`  keep-alive  ${KEEP_ALIVE}  ${C.dim('마지막 요청 뒤 이만큼 모델을 메모리에 붙잡아 둡니다')}`);
   console.log('');
   console.log(C.dim('  시각      이름·클라이언트        요청 / 응답'));
   console.log(C.dim('  ────────────────────────────────────────────────────────────'));
