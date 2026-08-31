@@ -34,7 +34,7 @@ const MAX_BODY = 24 * 1024 * 1024;
 const CORS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET,POST,OPTIONS',
-  'access-control-allow-headers': 'authorization,content-type',
+  'access-control-allow-headers': 'authorization,content-type,x-client-id',
   // A cross-origin fetch() only exposes the handful of "simple" response
   // headers to JS unless the server explicitly lists anything past that —
   // x-job-id would otherwise silently read back as null.
@@ -43,8 +43,112 @@ const CORS = {
   vary: 'origin',
 };
 
+/* ------------------------------------------------------------------ logging
+ *
+ * The launcher starts this process with -NoNewWindow, so everything printed
+ * here lands in the same PowerShell window the user ran start.ps1 in. That
+ * window is the only place to watch what the phone is actually doing, so it
+ * gets a real request log rather than a bare arrow: who asked, from which
+ * device, how much context went up, and how the answer came back out.
+ */
+const C = {
+  dim: (s) => `\x1b[2m${s}\x1b[0m`,
+  bold: (s) => `\x1b[1m${s}\x1b[0m`,
+  cyan: (s) => `\x1b[36m${s}\x1b[0m`,
+  green: (s) => `\x1b[32m${s}\x1b[0m`,
+  yellow: (s) => `\x1b[33m${s}\x1b[0m`,
+  red: (s) => `\x1b[31m${s}\x1b[0m`,
+  violet: (s) => `\x1b[35m${s}\x1b[0m`,
+};
+
 const ts = () => new Date().toLocaleTimeString('en-GB', { hour12: false });
-const log = (...a) => console.log(`\x1b[2m${ts()}\x1b[0m`, ...a);
+const log = (...a) => console.log(C.dim(ts()), ...a);
+
+// Hangul and CJK occupy two terminal columns, but padEnd counts code units —
+// a seat named "나" would knock every following column out of line without this.
+const WIDE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹯＀-｠￠-￦]/;
+const width = (s) => [...s].reduce((n, ch) => n + (WIDE.test(ch) ? 2 : 1), 0);
+const pad = (s, n) => s + ' '.repeat(Math.max(0, n - width(s)));
+const amt = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+
+/** The tunnel terminates on loopback, so the real address arrives in a header. */
+const clientIp = (req) =>
+  String(req.headers['cf-connecting-ip'] || req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+
+/** Coarse device label off the User-Agent — enough to tell phone from laptop. */
+function deviceOf(ua = '') {
+  const os = /iPhone/.test(ua) ? 'iPhone'
+    : /iPad/.test(ua) ? 'iPad'
+    : /Android/.test(ua) ? 'Android'
+    : /Macintosh|Mac OS X/.test(ua) ? 'Mac'
+    : /Windows/.test(ua) ? 'Windows'
+    : /Linux/.test(ua) ? 'Linux'
+    : '알 수 없음';
+  // Order matters: Edge and Samsung Internet both also claim to be Chrome.
+  const browser = /Edg\//.test(ua) ? 'Edge'
+    : /SamsungBrowser/.test(ua) ? 'Samsung'
+    : /OPR\//.test(ua) ? 'Opera'
+    : /Firefox\//.test(ua) ? 'Firefox'
+    : /Chrome\//.test(ua) ? 'Chrome'
+    : /Safari\//.test(ua) ? 'Safari'
+    : '';
+  return browser ? `${os} ${browser}` : os;
+}
+
+/**
+ * Two people can share one seat, and one person routinely has the app open on
+ * both a phone and a laptop — the access key alone can't tell those apart. The
+ * web UI mints a random id per browser and sends it on every request, which is
+ * what actually makes a line in this log identifiable.
+ */
+const clients = new Map(); // clientId -> { id, name, device, ip, turns, since }
+
+function trackClient(req, who) {
+  const id = String(req.headers['x-client-id'] || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 16) || '무명';
+  let c = clients.get(id);
+  if (!c) {
+    c = { id, name: who, device: deviceOf(req.headers['user-agent']), ip: clientIp(req), turns: 0, since: Date.now() };
+    clients.set(id, c);
+    log(C.green('＋'), `새 클라이언트  ${C.bold(who)} ${C.dim('·')} ${C.violet(id)} ${C.dim('·')} ${c.device} ${C.dim(c.ip)}`);
+  } else {
+    c.name = who;
+    c.ip = clientIp(req) || c.ip;
+  }
+  return c;
+}
+
+const tag = (c) => C.bold(pad(`${c.name}·${c.id}`, 20));
+
+/** What the phone is actually sending up, read straight off the request body. */
+function summarizeRequest(buf) {
+  try {
+    const req = JSON.parse(buf.toString('utf8'));
+    const msgs = Array.isArray(req.messages) ? req.messages : [];
+    let chars = 0;
+    let images = 0;
+    let audios = 0;
+    for (const m of msgs) {
+      const content = m.content;
+      if (typeof content === 'string') chars += content.length;
+      else if (Array.isArray(content)) {
+        for (const part of content) {
+          if (part.type === 'text') chars += (part.text || '').length;
+          else if (part.type === 'image_url') images++;
+          else if (part.type === 'input_audio') audios++;
+        }
+      }
+    }
+    return {
+      model: req.model || '(기본)',
+      turns: msgs.filter((m) => m.role !== 'system').length,
+      chars,
+      images,
+      audios,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function send(res, status, body, headers = {}) {
   const payload = typeof body === 'string' ? body : JSON.stringify(body);
@@ -79,7 +183,7 @@ function loadKeys() {
     keys = (Array.isArray(parsed) ? parsed : [parsed])
       .filter((k) => k && typeof k.key === 'string' && k.key)
       .slice(0, MAX_KEYS);
-    log(`keys: ${keys.map((k) => k.name).join(', ') || '(none)'}`);
+    log(C.dim('·'), C.dim(`좌석 갱신 · ${keys.map((k) => k.name).join(', ') || '(없음)'}`));
   } catch {
     keys = [];
   }
@@ -144,7 +248,7 @@ async function proxy(req, res, path) {
       signal: abort.signal,
     });
   } catch (err) {
-    log('\x1b[31mupstream unreachable\x1b[0m', err.message);
+    log(C.red('✗'), C.red('모델 서버에 연결하지 못했습니다'), C.dim(err.message));
     return send(res, 502, {
       error: { message: 'Model server is not reachable. Start it with: ollama serve' },
     });
@@ -163,7 +267,7 @@ async function proxy(req, res, path) {
       res.flushHeaders?.();
     }
   } catch (err) {
-    if (!abort.signal.aborted) log('\x1b[31mstream broke\x1b[0m', err.message);
+    if (!abort.signal.aborted) log(C.red('✗'), C.red('스트림이 끊겼습니다'), C.dim(err.message));
   }
   res.end();
 }
@@ -193,7 +297,11 @@ function parseSseDelta(line, job) {
   const payload = line.slice(5).trim();
   if (!payload || payload === '[DONE]') return;
   try {
-    const delta = JSON.parse(payload).choices?.[0]?.delta;
+    const parsed = JSON.parse(payload);
+    // The final chunk usually carries token counts; they make a far better
+    // log line than character counts, when the backend bothers to send them.
+    if (parsed.usage) job.usage = parsed.usage;
+    const delta = parsed.choices?.[0]?.delta;
     // Ollama sends this delta as `reasoning`; LM Studio (and OpenAI) call the
     // same thing `reasoning_content`. Take whichever shows up.
     const reasoningDelta = delta?.reasoning ?? delta?.reasoning_content;
@@ -202,20 +310,62 @@ function parseSseDelta(line, job) {
   } catch {}
 }
 
-async function handleChatCompletion(req, res) {
+async function handleChatCompletion(req, res, client) {
   const body = await readBody(req);
   pruneJobs();
 
+  const info = summarizeRequest(body);
+  const startedAt = Date.now();
+  client.turns++;
+  if (info) {
+    const bits = [`${info.turns}턴`, `${amt(info.chars)}자`];
+    if (info.images) bits.push(`이미지 ${info.images}`);
+    if (info.audios) bits.push(`오디오 ${info.audios}`);
+    log(C.cyan('→'), tag(client), C.dim(pad(info.model, 12)), bits.join(C.dim(' · ')));
+  } else {
+    log(C.cyan('→'), tag(client), C.dim('(본문을 읽지 못함)'));
+  }
+
   const id = randomBytes(9).toString('base64url');
   const upstreamAbort = new AbortController();
-  const job = { content: '', reasoning: '', done: false, error: null, createdAt: Date.now(), abort: upstreamAbort };
+  const job = {
+    content: '', reasoning: '', usage: null, done: false, error: null,
+    createdAt: Date.now(), abort: upstreamAbort, client,
+  };
   jobs.set(id, job);
 
   // The point of buffering: a closed downstream response must not cancel the
   // upstream generation. Only an explicit /cancel (the user actually pressing
   // stop) should do that — see the route below.
   let downstreamAlive = true;
-  res.on('close', () => { downstreamAlive = false; });
+  let detachedAt = null;
+  res.on('close', () => {
+    if (downstreamAlive && !job.done) detachedAt = Date.now();
+    downstreamAlive = false;
+  });
+
+  /** One closing line per request — this is what the shell is actually for. */
+  const report = () => {
+    const secs = (Date.now() - startedAt) / 1000;
+    const size = job.usage?.completion_tokens
+      ? `${job.usage.completion_tokens}tok`
+      : `${amt(job.content.length)}자`;
+    // A two-character answer has no meaningful rate — printing "0자/s" for it
+    // only makes the column look broken.
+    const rate = job.content.length >= 40 ? ` · ${(job.content.length / secs).toFixed(0)}자/s` : '';
+    const think = job.reasoning.length ? C.dim(` · 생각 ${amt(job.reasoning.length)}자`) : '';
+    const detached = detachedAt
+      ? C.yellow(`  ⤶ ${((detachedAt - startedAt) / 1000).toFixed(0)}초에 연결 끊김, 버퍼에 계속 받음`)
+      : '';
+
+    if (job.error) {
+      log(C.red('✗'), tag(client), C.red(`실패 · ${job.error}`), C.dim(`${secs.toFixed(1)}s`));
+    } else if (upstreamAbort.signal.aborted) {
+      log(C.yellow('⨯'), tag(client), C.yellow('사용자 취소'), C.dim(`${size} · ${secs.toFixed(1)}s`) + think);
+    } else {
+      log(C.green('←'), tag(client), `${size} · ${secs.toFixed(1)}s${rate}` + think + detached);
+    }
+  };
 
   let upstream;
   try {
@@ -228,7 +378,7 @@ async function handleChatCompletion(req, res) {
   } catch (err) {
     job.done = true;
     job.error = err.message;
-    log('\x1b[31mupstream unreachable\x1b[0m', err.message);
+    report();
     return send(res, 502, {
       error: { message: 'Model server is not reachable. Start it with: ollama serve' },
     });
@@ -242,6 +392,8 @@ async function handleChatCompletion(req, res) {
 
   if (!upstream.ok || !upstream.body) {
     job.done = true;
+    job.error = `모델 서버가 ${upstream.status} 응답`;
+    report();
     if (upstream.body) for await (const chunk of upstream.body) res.write(chunk);
     return res.end();
   }
@@ -262,6 +414,7 @@ async function handleChatCompletion(req, res) {
     if (!upstreamAbort.signal.aborted) job.error = err.message;
   }
   job.done = true;
+  report();
   if (downstreamAlive) { try { res.end(); } catch {} }
 }
 
@@ -287,26 +440,42 @@ const server = createServer(async (req, res) => {
 
   const who = identify(req);
   if (!who) {
-    log(`\x1b[33m401\x1b[0m ${req.method} ${pathname}`);
+    log(C.yellow('✗ 401'), C.dim(`${req.method} ${pathname}`), C.dim(clientIp(req)), C.dim(deviceOf(req.headers['user-agent'])));
     return send(res, 401, { error: { message: 'Invalid or missing access key.' } });
   }
 
-  if (pathname === '/v1/models' && req.method === 'GET') return proxy(req, res, '/v1/models');
+  const client = trackClient(req, who);
+
+  if (pathname === '/v1/models' && req.method === 'GET') {
+    log(C.dim('·'), tag(client), C.dim('모델 목록 조회'));
+    return proxy(req, res, '/v1/models');
+  }
   if (pathname === '/v1/chat/completions' && req.method === 'POST') {
-    log(`\x1b[36m→\x1b[0m ${who}`);
-    return handleChatCompletion(req, res);
+    return handleChatCompletion(req, res, client);
   }
 
   const jobMatch = pathname.match(/^\/v1\/jobs\/([A-Za-z0-9_-]+)(\/cancel)?$/);
   if (jobMatch) {
     const job = jobs.get(jobMatch[1]);
-    if (!job) return send(res, 404, { error: { message: 'Unknown or expired job.' } });
+    if (!job) {
+      log(C.yellow('?'), tag(client), C.yellow(`만료된 작업 ${jobMatch[1]}`));
+      return send(res, 404, { error: { message: 'Unknown or expired job.' } });
+    }
 
     if (jobMatch[2] && req.method === 'POST') {
-      if (!job.done) job.abort.abort();
+      if (!job.done) {
+        log(C.yellow('⨯'), tag(client), C.yellow('중지 요청'));
+        job.abort.abort();
+      }
       return send(res, 200, { ok: true });
     }
     if (!jobMatch[2] && req.method === 'GET') {
+      // Worth one line, not a wall of them: recovery polls this every second
+      // until the answer lands.
+      if (!job.polledBy?.has(client.id)) {
+        (job.polledBy ||= new Set()).add(client.id);
+        log(C.violet('↺'), tag(client), C.violet('끊긴 응답 이어받는 중'));
+      }
       return send(res, 200, {
         id: jobMatch[1],
         done: job.done,
@@ -328,10 +497,12 @@ server.listen(PORT, HOST, async () => {
   const up = await upstreamAlive();
   loadKeys();
   console.log('');
-  console.log('  \x1b[1msh-agent relay\x1b[0m');
+  console.log(`  ${C.bold('sh-agent relay')}`);
   console.log(`  listening   http://localhost:${PORT}`);
-  console.log(`  upstream    ${UPSTREAM} ${up.ok ? '\x1b[32m● online\x1b[0m' : '\x1b[31m● offline\x1b[0m'}`);
+  console.log(`  upstream    ${UPSTREAM} ${up.ok ? C.green('● online') : C.red('● offline')}`);
   if (up.ok && up.models.length) console.log(`  models      ${up.models.join(', ')}`);
   console.log(`  seats       ${keys.map((k) => k.name).join(', ') || '(none)'}  (최대 ${MAX_KEYS})`);
   console.log('');
+  console.log(C.dim('  시각      이름·클라이언트        요청 / 응답'));
+  console.log(C.dim('  ────────────────────────────────────────────────────────────'));
 });

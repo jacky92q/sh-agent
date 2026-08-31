@@ -190,12 +190,62 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
   max-width: 84%;
   gap: 5px;
 }
+/* The clock rides beside the bubble, baseline-aligned to its last line —
+   the messenger convention, and it keeps the bubble itself uncluttered. */
+.turn.user .bubble-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 7px;
+  max-width: 100%;
+}
 .turn.user .bubble {
   padding: 11px 16px;
   border: 1px solid var(--line);
   border-radius: 20px 20px 7px 20px;
   background: var(--surface);
   max-width: 100%;
+  min-width: 0;
+}
+
+.stamp {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+  white-space: nowrap;
+  padding-bottom: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.turn.model .byline .stamp {
+  padding-bottom: 0;
+  letter-spacing: 0.1em;
+}
+.turn.model .byline .stamp:empty { display: none; }
+
+/* day rule ------------------------------------------------------------------
+   Only appears where the calendar day actually changes, so a single sitting
+   never grows one. */
+.day-sep {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  align-self: stretch;
+  animation: turn-in 0.5s var(--ease) both;
+}
+.day-sep::before,
+.day-sep::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+.day-sep span {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
 }
 .turn.user .user-text { white-space: pre-wrap; word-break: break-word; }
 .turn.user .user-text:not(:first-child) { margin-top: 9px; }

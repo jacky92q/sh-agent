@@ -204,6 +204,54 @@ async function readDoc(file, kind) {
 const countPending = (kind) => state.pendingAttachments.filter((a) => a.kind === kind).length;
 const newId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
+/**
+ * Message clocks. Chats saved before timestamps existed carry no `at`, and
+ * guessing one would be worse than showing none — those turns simply have no
+ * stamp rather than a plausible-looking lie.
+ */
+const fmtClock = (at) =>
+  new Date(at).toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit' });
+const fmtStampTitle = (at) =>
+  new Date(at).toLocaleString('ko-KR', {
+    year: 'numeric', month: 'long', day: 'numeric',
+    weekday: 'short', hour: 'numeric', minute: '2-digit',
+  });
+const fmtDay = (at) => {
+  const d = new Date(at);
+  const today = new Date();
+  const midnight = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((midnight(today) - midnight(d)) / 86400000);
+  if (days === 0) return '오늘';
+  if (days === 1) return '어제';
+  return d.toLocaleDateString('ko-KR', {
+    year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric',
+    month: 'long',
+    day: 'numeric',
+    weekday: 'long',
+  });
+};
+const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
+
+/**
+ * A stable per-browser id, sent on every request so the PC-side log can tell
+ * "phone" from "laptop" even when both are on the same access key. It never
+ * leaves this device except as this opaque string — no fingerprinting, and
+ * clearing site data resets it.
+ */
+const CLIENT_ID_KEY = 'sh-agent:client-id';
+const clientId = (() => {
+  try {
+    let id = localStorage.getItem(CLIENT_ID_KEY);
+    if (!id) {
+      id = Math.random().toString(36).slice(2, 6) + Math.random().toString(36).slice(2, 6);
+      localStorage.setItem(CLIENT_ID_KEY, id);
+    }
+    return id;
+  } catch {
+    return 'nostore';
+  }
+})();
+
 const DOC_ICON =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4M9 12h6M9 16h6"/></svg>';
 const AUDIO_ICON =
@@ -439,7 +487,7 @@ stage.addEventListener('scroll', () => {
   state.stickToBottom = stage.scrollHeight - stage.scrollTop - stage.clientHeight < 130;
 });
 
-function addUserTurn(text, images = [], docs = [], audios = [], id = null) {
+function addUserTurn(text, images = [], docs = [], audios = [], id = null, at = null) {
   const el = document.createElement('div');
   el.className = 'turn user';
   if (id) el.dataset.msgId = id;
@@ -489,7 +537,20 @@ function addUserTurn(text, images = [], docs = [], audios = [], id = null) {
     p.textContent = text;
     bubble.append(p);
   }
-  el.append(bubble);
+  // The clock sits outside the bubble, on the inner side — the messenger
+  // convention, and it keeps long text from having to flow around it.
+  const row = document.createElement('div');
+  row.className = 'bubble-row';
+  if (at) {
+    const stamp = document.createElement('time');
+    stamp.className = 'stamp';
+    stamp.dateTime = new Date(at).toISOString();
+    stamp.title = fmtStampTitle(at);
+    stamp.textContent = fmtClock(at);
+    row.append(stamp);
+  }
+  row.append(bubble);
+  el.append(row);
 
   if (id) {
     const actions = document.createElement('div');
@@ -578,14 +639,20 @@ function latestThinkingPhase(text) {
  * folded away the moment real content starts — the full trace stays behind
  * the toggle the whole time, open only if someone taps it.
  */
-function addModelTurn(id = null) {
+function addModelTurn(id = null, at = null) {
   const el = document.createElement('div');
   el.className = 'turn model live';
   if (id) el.dataset.msgId = id;
 
   const byline = document.createElement('div');
   byline.className = 'byline';
-  byline.textContent = (state.cfg.model || 'model').split('/').pop();
+  const bylineName = document.createElement('span');
+  bylineName.textContent = (state.cfg.model || 'model').split('/').pop();
+  // Empty until the answer lands: a reply that is still streaming has no
+  // finish time yet, and stamping the start would drift by however long it ran.
+  const bylineStamp = document.createElement('time');
+  bylineStamp.className = 'stamp';
+  byline.append(bylineName, bylineStamp);
 
   const think = document.createElement('div');
   think.className = 'think';
@@ -620,9 +687,18 @@ function addModelTurn(id = null) {
     if (open) thinkBody.scrollTop = thinkBody.scrollHeight;
   });
 
+  const setTime = (ts) => {
+    if (!ts) return;
+    bylineStamp.dateTime = new Date(ts).toISOString();
+    bylineStamp.title = fmtStampTitle(ts);
+    bylineStamp.textContent = fmtClock(ts);
+  };
+  setTime(at);
+
   return {
     el,
     body,
+    setTime,
     setId(newMsgId) { el.dataset.msgId = newMsgId; },
     showThinking(text) {
       // Reveal the collapsed summary bar; never force it open — that was the
@@ -662,6 +738,24 @@ function addNotice(html, { retry = false } = {}) {
   scrollToEnd(true);
 }
 
+/**
+ * Drops a "오늘 / 어제 / 8월 30일 금요일" rule into the thread whenever the
+ * calendar day changes. Reads the day off the last rule already in the DOM
+ * rather than a loop variable, so it works the same for a full repaint and
+ * for a single turn appended live.
+ */
+function appendDaySep(at) {
+  if (!at) return;
+  const seps = thread.querySelectorAll('.day-sep');
+  const last = seps[seps.length - 1];
+  if (last && sameDay(Number(last.dataset.at), at)) return;
+  const sep = document.createElement('div');
+  sep.className = 'day-sep';
+  sep.dataset.at = String(at);
+  sep.innerHTML = `<span>${esc(fmtDay(at))}</span>`;
+  thread.appendChild(sep);
+}
+
 function paintThread() {
   thread.replaceChildren();
   const chat = activeChat();
@@ -678,11 +772,12 @@ function paintThread() {
   if (needsSave) saveChats();
 
   for (const m of msgs) {
+    appendDaySep(m.at);
     if (m.role === 'user') {
       const { text, images, docs, audios } = partsOf(m.content);
-      addUserTurn(text, images, docs, audios, m.id);
+      addUserTurn(text, images, docs, audios, m.id, m.at);
     } else {
-      const turn = addModelTurn(m.id);
+      const turn = addModelTurn(m.id, m.at);
       turn.el.classList.remove('live');
       turn.el.style.animation = 'none';
       if (m.reasoning) {
@@ -845,7 +940,7 @@ function loadPending() {
 
 async function fetchJob(endpoint, token, jobId, signal) {
   const r = await fetch(`${endpoint.replace(/\/+$/, '')}/v1/jobs/${jobId}`, {
-    headers: { authorization: `Bearer ${token}` },
+    headers: { authorization: `Bearer ${token}`, 'x-client-id': clientId },
     cache: 'no-store',
     signal,
   });
@@ -935,14 +1030,15 @@ async function runCompletion(chat) {
   const commit = () => {
     const { visibleText, actions } = extractActions(acc);
     if (!visibleText && !actions.length) return null;
-    const message = { id: newId(), role: 'assistant', content: visibleText };
+    const message = { id: newId(), role: 'assistant', at: Date.now(), content: visibleText };
     if (reasoning.trim()) message.reasoning = reasoning.trim();
     if (actions.length) message.appliedActions = actions;
     chat.messages.push(message);
-    chat.at = Date.now();
+    chat.at = message.at;
     saveChats();
     paintHistory();
     turn.setId(message.id);
+    turn.setTime(message.at);
     turn.body.innerHTML = renderMarkdown(visibleText);
     renderActionResults(turn.el, actions);
     return message;
@@ -953,7 +1049,7 @@ async function runCompletion(chat) {
   try {
     const res = await fetch(`${endpoint.replace(/\/+$/, '')}/v1/chat/completions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'x-client-id': clientId },
       body: JSON.stringify({
         model: state.cfg.model || undefined,
         messages,
@@ -1069,14 +1165,15 @@ async function send(text, images = [], docs = [], audios = []) {
   if (chat.messages.length === 0) {
     chat.title = text.replace(/\s+/g, ' ').slice(0, 42) || docs[0]?.name || (audios.length ? '음성 메시지' : '이미지 메시지');
   }
-  const userMsg = { id: newId(), role: 'user', content: toStored(text, images, docs, audios) };
+  const userMsg = { id: newId(), role: 'user', at: Date.now(), content: toStored(text, images, docs, audios) };
   chat.messages.push(userMsg);
-  chat.at = Date.now();
+  chat.at = userMsg.at;
   saveChats();
   paintHistory();
 
   $('overture').hidden = true;
-  addUserTurn(text, images, docs, audios, userMsg.id);
+  appendDaySep(userMsg.at);
+  addUserTurn(text, images, docs, audios, userMsg.id, userMsg.at);
   scrollToEnd(true);
 
   await runCompletion(chat);
@@ -1191,7 +1288,7 @@ function cancelStream() {
   if (jobId && endpoint) {
     fetch(`${endpoint.replace(/\/+$/, '')}/v1/jobs/${jobId}/cancel`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, 'x-client-id': clientId },
     }).catch(() => {});
   }
 }
@@ -1475,7 +1572,7 @@ $('testBtn').addEventListener('click', async () => {
   // The key only matters on /v1/*, so verify it separately.
   try {
     const r = await fetch(`${state.cfg.endpoint}/v1/models`, {
-      headers: { authorization: `Bearer ${state.cfg.token}` },
+      headers: { authorization: `Bearer ${state.cfg.token}`, 'x-client-id': clientId },
       signal: AbortSignal.timeout(7000),
     });
     if (r.status === 401) {
@@ -1964,13 +2061,18 @@ async function recoverPendingGeneration() {
       3 * 60 * 1000
     );
     if (final.content?.trim()) {
-      const message = { role: 'assistant', content: final.content };
+      const message = { id: newId(), role: 'assistant', at: Date.now(), content: final.content };
       if (final.reasoning?.trim()) message.reasoning = final.reasoning.trim();
       chat.messages.push(message);
-      chat.at = Date.now();
+      chat.at = message.at;
       saveChats();
       paintHistory();
-      if (turn) { turn.el.classList.remove('live'); turn.sealThinking(); }
+      if (turn) {
+        turn.el.classList.remove('live');
+        turn.setId(message.id);
+        turn.setTime(message.at);
+        turn.sealThinking();
+      }
       toast('이어받기 완료');
     } else if (turn) {
       turn.el.remove();
