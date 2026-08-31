@@ -4,7 +4,9 @@
     Brings up, in order:
       1. the Ollama OpenAI-compatible server      (localhost:11434)
       2. the relay                                (localhost:8787, token gated)
-      3. a Cloudflare quick tunnel                (https://<random>.trycloudflare.com)
+      3. a public address for it, whichever is available:
+           Tailscale Funnel  https://<machine>.<tailnet>.ts.net   (fixed)
+           Cloudflare quick  https://<random>.trycloudflare.com   (changes)
 
     Then prints a pairing link for https://jacky92q.github.io/sh-agent/.
     Ctrl+C tears everything back down.
@@ -24,6 +26,8 @@ param(
     [switch]$NoWarmup,            # skip preloading the model at startup
     [string]$PagesUrl = 'https://jacky92q.github.io/sh-agent/',
     [switch]$NoTunnel,      # LAN only: skip cloudflared, print the local address
+    [ValidateSet('auto', 'tailscale', 'cloudflare', 'none')]
+    [string]$Tunnel = 'auto',   # auto: fixed Tailscale address if available, else a random one
     [switch]$NewKey,        # rotate every key (everyone re-pairs)
     [switch]$Restart,       # stop a session that is already running and start fresh
     [string]$AddGuest,      # issue the second seat to someone, print their link
@@ -350,10 +354,120 @@ try {
 }
 
 # ------------------------------------------------------------------ tunnel
+#
+# Two ways out to the internet, and they differ in one thing that matters
+# daily: whether the address survives a restart.
+#
+#   Tailscale Funnel  https://<machine>.<tailnet>.ts.net   same every time
+#   Cloudflare quick  https://<random>.trycloudflare.com   new every time
+#
+# The random one needs no account, which is why it shipped first, but it also
+# means re-pairing the phone after every restart. Funnel is preferred when the
+# tailnet has it turned on, and the quick tunnel stays as the fallback so this
+# script still works on a machine with no Tailscale at all.
 $publicUrl = "http://localhost:$RelayPort"
-$tunnel = $null
+$cfTunnel = $null
+$funnelOn = $false
 
-if (-not $NoTunnel) {
+if ($NoTunnel) { $Tunnel = 'none' }
+
+# Windows PowerShell decodes a native exe's stdout with the console codepage
+# (cp949 here), so any non-ASCII in it comes back corrupted — and this tailnet
+# has a device named in Hangul, which was enough to break `status --json` into
+# invalid JSON. Capturing to a file and reading it back as UTF-8 sidesteps that
+# without touching [Console]::OutputEncoding, which the rest of this script's
+# Korean output depends on.
+function Invoke-TailscaleOut($exe, $tsArgs) {
+    $out = Join-Path $stateDir "ts-$PID.out"
+    try {
+        Start-Process -FilePath $exe -ArgumentList $tsArgs -NoNewWindow -Wait `
+            -RedirectStandardOutput $out -RedirectStandardError "$out.err" | Out-Null
+        if (Test-Path $out) {
+            return [IO.File]::ReadAllText($out, (New-Object Text.UTF8Encoding $false))
+        }
+    } catch { }
+    finally { Remove-Item "$out*" -Force -ErrorAction SilentlyContinue }
+    return ''
+}
+
+function Get-TailscaleExe {
+    $ts = (Get-Command tailscale -ErrorAction SilentlyContinue).Source
+    if ($ts) { return $ts }
+    foreach ($c in @((Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'),
+                     (Join-Path ${env:ProgramFiles(x86)} 'Tailscale\tailscale.exe'))) {
+        if (Test-Path $c) { return $c }
+    }
+    return $null
+}
+
+if ($Tunnel -eq 'auto' -or $Tunnel -eq 'tailscale') {
+    $ts = Get-TailscaleExe
+    if (-not $ts) {
+        if ($Tunnel -eq 'tailscale') {
+            Step 'Tunnel'
+            Say '    tailscale이 없습니다:  winget install --id tailscale.tailscale' 'Red'
+            exit 1
+        }
+    } else {
+        Step 'Tunnel (Tailscale Funnel)'
+        # PowerShell 5.1 turns anything a native exe writes to stderr into an
+        # ErrorRecord, and $ErrorActionPreference is 'Stop' at the top of this
+        # script — so a perfectly successful `tailscale status` was being
+        # caught as a failure and read as "not logged in". Native calls in
+        # this block run with that turned off.
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+
+        $dns = $null
+        try {
+            $st = (Invoke-TailscaleOut $ts @('status', '--json')) | ConvertFrom-Json
+            $dns = $st.Self.DNSName
+        } catch { $dns = $null }
+
+        if (-not $dns) {
+            Say '    tailscale에 로그인되어 있지 않습니다:  tailscale up' 'Yellow'
+        } else {
+            $dns = $dns.TrimEnd('.')
+            # Whether Funnel is allowed is a tailnet policy setting, and there
+            # is no reliable flag to read for it — so just try. When it is off,
+            # the command prints an enable link and then waits, which is why
+            # this runs detached with a deadline instead of inline.
+            $funnelLog = Join-Path $stateDir "funnel-$PID.log"
+            $fp = Start-Process -FilePath $ts -ArgumentList @('funnel', '--bg', "$RelayPort") `
+                -NoNewWindow -PassThru -RedirectStandardOutput $funnelLog -RedirectStandardError "$funnelLog.err"
+            $deadline = (Get-Date).AddSeconds(20)
+            while (-not $fp.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+            if (-not $fp.HasExited) { Stop-Process -Id $fp.Id -Force -ErrorAction SilentlyContinue }
+
+            $cfg = Invoke-TailscaleOut $ts @('funnel', 'status')
+            if ($cfg -match [regex]::Escape("$RelayPort")) {
+                $funnelOn = $true
+                $publicUrl = "https://$dns"
+                Say "    $publicUrl" 'Green'
+                Say '    이 주소는 다시 켜도 그대로입니다 — 폰에서 재설정할 필요가 없습니다.'
+            } else {
+                $out = ''
+                foreach ($f in @($funnelLog, "$funnelLog.err")) {
+                    if (Test-Path $f) { $out += [IO.File]::ReadAllText($f, (New-Object Text.UTF8Encoding $false)) }
+                }
+                $link = ([regex]'https://login\.tailscale\.com/\S+').Match($out).Value
+                if ($link) {
+                    Say '    Funnel이 이 tailnet에서 꺼져 있습니다. 아래 주소에서 한 번 켜주세요:' 'Yellow'
+                    Say "      $link" 'White'
+                    Say '    켠 뒤 이 스크립트를 다시 실행하면 고정 주소를 씁니다.' 'Yellow'
+                } else {
+                    Say '    Funnel을 켜지 못했습니다.' 'Yellow'
+                }
+                if ($Tunnel -eq 'tailscale') { exit 1 }
+                Say '    이번에는 임시 주소로 진행합니다.'
+            }
+            Remove-Item "$funnelLog*" -Force -ErrorAction SilentlyContinue
+        }
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
+if (-not $funnelOn -and $Tunnel -ne 'none') {
     Step 'Tunnel'
     # winget updates the machine PATH, which an already-open shell will not see,
     # so fall back to the places the MSI actually puts it.
@@ -375,10 +489,10 @@ if (-not $NoTunnel) {
     # Best effort: a log still held open by an earlier tunnel is not our problem.
     Get-ChildItem (Join-Path $stateDir 'tunnel-*.log*') -ErrorAction SilentlyContinue |
         ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { } }
-    $tunnel = Start-Process -FilePath $cfPath `
+    $cfTunnel = Start-Process -FilePath $cfPath `
         -ArgumentList @('tunnel', '--no-autoupdate', '--url', "http://localhost:$RelayPort") `
         -NoNewWindow -PassThru -RedirectStandardError $tunnelLog -RedirectStandardOutput "$tunnelLog.out"
-    $procs += $tunnel
+    $procs += $cfTunnel
 
     Say '    주소를 받아오는 중...'
     $deadline = (Get-Date).AddSeconds(40)
@@ -416,9 +530,10 @@ $session = [ordered]@{
     port      = $RelayPort
     relayPid  = $relay.Id
     tunnelPid = $null
+    funnel    = $funnelOn
     startedAt = (Get-Date).ToString('s')
 }
-if ($tunnel) { $session.tunnelPid = $tunnel.Id }
+if ($cfTunnel) { $session.tunnelPid = $cfTunnel.Id }
 [IO.File]::WriteAllText($sessionFile, ($session | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
 
 if ($NoTunnel) {
@@ -442,4 +557,13 @@ try {
     }
     Remove-Item $sessionFile -Force -ErrorAction SilentlyContinue
     Remove-Item "$tunnelLog*" -Force -ErrorAction SilentlyContinue
+    # Funnel config lives in tailscaled, not in a process we can kill — left
+    # up it would keep answering on a port with nothing behind it.
+    if ($funnelOn) {
+        $ts = Get-TailscaleExe
+        if ($ts) {
+            $ErrorActionPreference = 'Continue'
+            & $ts funnel reset | Out-Null
+        }
+    }
 }

@@ -87,9 +87,18 @@ const width = (s) => [...s].reduce((n, ch) => n + (WIDE.test(ch) ? 2 : 1), 0);
 const pad = (s, n) => s + ' '.repeat(Math.max(0, n - width(s)));
 const amt = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 
-/** The tunnel terminates on loopback, so the real address arrives in a header. */
+/**
+ * The tunnel terminates on loopback whichever one is in front, so the socket
+ * address is always 127.0.0.1 and the real one arrives in a header:
+ * cf-connecting-ip from Cloudflare, x-forwarded-for from Tailscale Funnel.
+ */
 const clientIp = (req) =>
-  String(req.headers['cf-connecting-ip'] || req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  String(
+    req.headers['cf-connecting-ip'] ||
+    String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
+    req.socket.remoteAddress ||
+    ''
+  ).replace(/^::ffff:/, '');
 
 /** Coarse device label off the User-Agent — enough to tell phone from laptop. */
 function deviceOf(ua = '') {
@@ -164,6 +173,41 @@ function summarizeRequest(buf) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Bad-key throttle.
+ *
+ * The access key is 128 bits of CSPRNG output, so this is not what stands
+ * between anyone and the model — guessing it is not on the table. What this
+ * actually buys is quiet: on a permanent address (Tailscale Funnel, a named
+ * tunnel) the hostname ends up in certificate transparency logs within hours
+ * of the first certificate, scanners find it, and without this the shell log
+ * fills with 401 lines and every one of them costs a key comparison.
+ */
+const failures = new Map(); // ip -> { count, until, warned }
+const FAIL_LIMIT = 8;
+const FAIL_WINDOW_MS = 60 * 1000;
+
+function throttled(ip) {
+  const f = failures.get(ip);
+  return !!f && f.until > Date.now() && f.count >= FAIL_LIMIT;
+}
+
+function noteFailure(ip) {
+  const now = Date.now();
+  let f = failures.get(ip);
+  if (!f || f.until <= now) f = { count: 0, until: now + FAIL_WINDOW_MS, warned: false };
+  f.count++;
+  failures.set(ip, f);
+  if (failures.size > 500) for (const [k, v] of failures) if (v.until <= now) failures.delete(k);
+  // One line when it trips, not one per attempt — the whole point is to stop
+  // a scanner from owning the log.
+  if (f.count >= FAIL_LIMIT && !f.warned) {
+    f.warned = true;
+    log(C.red('⛔'), C.red(`${ip} 키 실패 ${FAIL_LIMIT}회 — 1분간 차단`));
+  }
+  return f;
 }
 
 function send(res, status, body, headers = {}) {
@@ -491,6 +535,11 @@ const server = createServer(async (req, res) => {
   if (pathname === '/health') {
     const up = await upstreamAlive();
     loadKeys();
+    // Enough for the connection light to work before anyone has pasted a key,
+    // and nothing more: which models this machine has, how many people can
+    // reach it and where the model server lives are not a stranger's business
+    // once the address stops rotating.
+    if (!identify(req)) return send(res, 200, { relay: 'ok', upstream: up.ok });
     return send(res, 200, {
       relay: 'ok',
       upstream: up.ok,
@@ -504,11 +553,23 @@ const server = createServer(async (req, res) => {
     });
   }
 
+
+
+  // Deliberately after the key check, never before it: behind Funnel every
+  // request arrives from the same address unless a proxy header says
+  // otherwise, so gating on the address first would let one scanner lock the
+  // actual user out. A correct key always gets through and clears the count.
   const who = identify(req);
   if (!who) {
-    log(C.yellow('✗ 401'), C.dim(`${req.method} ${pathname}`), C.dim(clientIp(req)), C.dim(deviceOf(req.headers['user-agent'])));
+    const ip = clientIp(req);
+    const f = noteFailure(ip);
+    if (throttled(ip)) {
+      return send(res, 429, { error: { message: 'Too many failed attempts. Try again shortly.' } }, { 'retry-after': '60' });
+    }
+    log(C.yellow('✗ 401'), C.dim(`${req.method} ${pathname}`), C.dim(ip), C.dim(deviceOf(req.headers['user-agent'])));
     return send(res, 401, { error: { message: 'Invalid or missing access key.' } });
   }
+  failures.delete(clientIp(req));
 
   const client = trackClient(req, who);
 

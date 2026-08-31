@@ -46,10 +46,42 @@ Ollama 서버 → 릴레이 → 터널이 차례로 뜨고, **페어링 링크**
 2. 출력된 링크를 폰에서 열기
 3. 끝나면 터미널에서 `Ctrl+C`
 
-**터널 주소는 실행할 때마다 바뀝니다.** 그래서 PC를 껐다 켜면 링크를 다시 열어야 합니다.
-고정 주소가 필요하면 Cloudflare 계정을 붙여 named tunnel로 바꾸면 됩니다.
-
 이미 켜져 있는데 또 실행하면 새로 띄우지 않고 **기존 링크를 다시 출력**합니다. 링크를 잃어버렸을 때 쓰세요.
+
+---
+
+## 주소 고정하기 (권장)
+
+기본값인 Cloudflare 임시 터널은 **실행할 때마다 주소가 바뀌어서** PC를 껐다 켤 때마다 폰에서 링크를 다시 열어야 합니다.
+**Tailscale Funnel**을 쓰면 주소가 고정돼서 그 과정이 사라집니다. 도메인도, 결제도 필요 없습니다.
+
+```powershell
+winget install --id tailscale.tailscale
+tailscale up
+```
+
+로그인한 뒤 `start.ps1`을 실행하면, Funnel이 아직 꺼져 있다는 안내와 함께 **활성화 링크가 출력됩니다.**
+그 링크를 한 번 열어서 켜주세요 (tailnet 설정이라 최초 1회만).
+
+켜고 나면 이후로는 항상 이 주소를 씁니다.
+
+```
+https://<컴퓨터이름>.<tailnet>.ts.net
+```
+
+`start.ps1`은 알아서 판단합니다 — Funnel이 준비돼 있으면 고정 주소를, 아니면 임시 주소를 씁니다.
+강제로 지정하려면 `-Tunnel tailscale` 또는 `-Tunnel cloudflare`를 쓰세요.
+
+### 고정하면 뭐가 달라지나
+
+접속 키는 128비트 난수라 주소가 알려져도 모델을 쓸 수는 없습니다. 다만 **주소가 영구적이 되면
+인증서 투명성(CT) 로그에 호스트명이 공개되고, 스캐너가 찾아옵니다.** 그래서 같이 넣어둔 것이 둘 있습니다.
+
+- `/health`는 인증 없이 부르면 `relay`/`upstream` 상태만 답합니다. 모델 목록·좌석 수·업스트림 주소는 키가 있어야 나옵니다.
+- 키가 1분에 8번 틀리면 그 주소는 1분간 429로 막고, 로그에는 한 줄만 남깁니다.
+
+> 차단은 **키 검사 뒤에** 걸립니다. Funnel 뒤에서는 모든 요청이 같은 주소로 보일 수 있어서,
+> 먼저 걸면 스캐너 하나가 정작 본인을 잠가버릴 수 있기 때문입니다. 올바른 키는 항상 통과합니다.
 
 ---
 
@@ -227,7 +259,8 @@ powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -Revoke 민수
 | `-Seats` | 현재 좌석 목록 |
 | `-Restart` | 실행 중인 세션을 끄고 새로 띄움 (주소가 바뀝니다) |
 | `-NewKey` | 모든 키 폐기 (두 사람 모두 재페어링) |
-| `-NoTunnel` | 터널 없이 LAN 주소만 (PC에서 로컬로 열 때만) |
+| `-Tunnel` | `auto`(기본) · `tailscale`(고정 주소) · `cloudflare`(임시 주소) · `none` |
+| `-NoTunnel` | 터널 없이 LAN 주소만 (PC에서 로컬로 열 때만) · `-Tunnel none`과 동일 |
 | `-RelayPort` / `-ModelPort` | 포트 변경 |
 | `-ModelName` | 사용할 모델 태그 (기본 `gemma4:e2b`) |
 | `-KeepAlive` | 마지막 요청 뒤 모델을 메모리에 붙잡아 둘 시간 (기본 `30m`, `-1`은 무기한) |
@@ -241,6 +274,7 @@ powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -Revoke 민수
 | --- | --- |
 | 폰에서 설정 팝업이 뜬다 | 링크가 잘렸습니다. 링크 전체를 `서버 주소` 칸에 붙여넣으세요 |
 | 빨간 불 · "연결 실패" | PC의 `start.ps1`이 꺼졌거나 주소가 바뀌었습니다. 새 링크를 여세요 |
+| 매번 링크를 다시 열어야 한다 | 임시 터널을 쓰고 있습니다. [주소 고정하기](#주소-고정하기-권장) 참고 |
 | 빨간 불 · "LM STUDIO 꺼짐" | 릴레이는 살아있지만 모델 서버가 꺼졌습니다 |
 | 고친 게 폰에 반영이 안 된다 | 배포 후 최대 10분간 HTML이 캐시됩니다. 새로고침하세요 |
 | 첫 응답이 1~2분 걸린다 | 모델 재적재입니다. 위 [첫 응답이 한참 걸릴 때](#첫-응답이-한참-걸릴-때) 참고 |
@@ -282,7 +316,8 @@ powershell -ExecutionPolicy Bypass -File scripts\start.ps1 -Revoke 민수
 ## 구조
 
 ```
-폰 브라우저 → GitHub Pages(정적 UI) → Cloudflare 터널 → 릴레이 :8787 → Ollama :11434
+폰 브라우저 → GitHub Pages(정적 UI) → 터널 → 릴레이 :8787 → Ollama :11434
+                                      └ Tailscale Funnel (고정) 또는 Cloudflare quick (임시)
 ```
 
 GitHub Pages는 HTTPS라 `http://집IP:11434`를 직접 부르면 브라우저가 차단합니다. 터널이 필요한 이유입니다.

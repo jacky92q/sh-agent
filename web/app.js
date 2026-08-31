@@ -916,8 +916,12 @@ async function health(quiet) {
   const { endpoint } = state.cfg;
   if (!endpoint) { setLed('idle', '서버 미설정'); return null; }
   try {
+    // Authenticated so the reply carries the model list and what is resident:
+    // the relay keeps those back from callers it doesn't recognise, since a
+    // fixed address means strangers do eventually knock.
     const r = await fetch(`${endpoint.replace(/\/+$/, '')}/health`, {
       cache: 'no-store',
+      headers: state.cfg.token ? { authorization: `Bearer ${state.cfg.token}`, 'x-client-id': clientId } : {},
       signal: AbortSignal.timeout(7000),
     });
     const data = await r.json();
@@ -1081,6 +1085,7 @@ async function runCompletion(chat) {
     try {
       const r = await fetch(`${endpoint.replace(/\/+$/, '')}/health`, {
         cache: 'no-store',
+        headers: { authorization: `Bearer ${token}`, 'x-client-id': clientId },
         signal: AbortSignal.timeout(5000),
       });
       const data = await r.json();
